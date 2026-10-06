@@ -1,9 +1,10 @@
 {
-  "id": "gdrive-vault-sync",
-  "name": "Google Drive Vault Sync",
-  "version": "0.1.3",
+  "id": "gsync",
+  "name": "GSync",
+  "version": "1.0.0",
   "minAppVersion": "1.6.6",
-  "description": "Two-way sync between your vault and a folder in Google Drive, using the Drive API. Works on desktop and mobile.",
-  "author": "Dmitry",
+  "description": "Two-way sync between your vault and a Google Drive folder using the Google Drive API. Works on desktop and mobile.",
+  "author": "dg0988",
+  "authorUrl": "https://github.com/dg0988",
   "isDesktopOnly": false
 }

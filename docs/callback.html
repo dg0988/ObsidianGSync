@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>GSync sign-in</title>
+<style>
+  :root { color-scheme: light dark; --bg:#fafafa; --fg:#1d1d1f; --muted:#6b6b70; --accent:#7c3aed; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1b1b1f; --fg:#f2f2f4; --muted:#a0a0a8; --accent:#a78bfa; } }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background:var(--bg); color:var(--fg); }
+  main { max-width: 28rem; padding: 2rem 1.5rem; text-align:center; }
+  h1 { font-size: 1.4rem; margin: 0 0 .75rem; }
+  p { color: var(--muted); line-height: 1.5; }
+  .btn { display:inline-block; margin-top:1rem; padding:.85rem 1.5rem; border-radius:.6rem;
+         background:var(--accent); color:#fff; text-decoration:none; font-weight:600; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1 id="title">Returning to Obsidian…</h1>
+  <p id="msg">If Obsidian doesn't open by itself, tap the button below.</p>
+  <a id="open" class="btn" href="#">Open Obsidian</a>
+  <p><small>This page only passes Google's one-time sign-in code to the GSync plugin on your device. It stores and sends nothing anywhere else.</small></p>
+</main>
+<script>
+(function () {
+  var q = new URLSearchParams(window.location.search);
+  var code = q.get("code"), state = q.get("state") || "", error = q.get("error");
+  var title = document.getElementById("title"), msg = document.getElementById("msg"), btn = document.getElementById("open");
+
+  if (!code && !error) {
+    title.textContent = "GSync sign-in";
+    msg.textContent = "Nothing to do here. Start sign-in from the GSync settings in Obsidian.";
+    btn.classList.add("hidden");
+    return;
+  }
+
+  // The vault name is carried in the state after "~" (base64url) so the right vault opens.
+  var vault = "";
+  var i = state.indexOf("~");
+  if (i >= 0) {
+    try {
+      var b = state.slice(i + 1).replace(/-/g, "+").replace(/_/g, "/");
+      while (b.length % 4) b += "=";
+      var bin = atob(b), bytes = new Uint8Array(bin.length);
+      for (var k = 0; k < bin.length; k++) bytes[k] = bin.charCodeAt(k);
+      vault = new TextDecoder().decode(bytes);
+    } catch (e) { vault = ""; }
+  }
+
+  var parts = [];
+  if (vault) parts.push("vault=" + encodeURIComponent(vault));
+  if (code) parts.push("code=" + encodeURIComponent(code));
+  if (state) parts.push("state=" + encodeURIComponent(state));
+  if (error) parts.push("error=" + encodeURIComponent(error));
+  var url = "obsidian://gsync-auth?" + parts.join("&");
+
+  btn.href = url;
+  if (error) {
+    title.textContent = "Sign-in was cancelled";
+    msg.textContent = "Google returned: " + error + ". Return to Obsidian and try again.";
+  }
+  // Remove the code from the address bar and history.
+  try { history.replaceState(null, "", window.location.pathname); } catch (e) {}
+  setTimeout(function () { window.location.href = url; }, 300);
+})();
+</script>
+</body>
+</html>
