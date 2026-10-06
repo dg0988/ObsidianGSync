@@ -1,0 +1,46 @@
+name: Release
+
+# Publish a GitHub release (tag = manifest version, e.g. 1.0.2) and this
+# workflow builds main.js from the tagged source, creates signed build
+# provenance attestations, and attaches main.js + manifest.json to the release.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write      # upload release assets
+  id-token: write      # sign attestations
+  attestations: write  # store attestations
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Check manifest version matches tag
+        run: |
+          V=$(node -p "require('./manifest.json').version")
+          T="${{ github.event.release.tag_name }}"
+          if [ "$V" != "$T" ]; then echo "manifest.json version $V does not match tag $T"; exit 1; fi
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+
+      - name: Attach assets to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" main.js manifest.json --clobber
