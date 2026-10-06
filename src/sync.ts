@@ -37,8 +37,10 @@ function parseExcludes(raw: string): string[] {
     .filter((s) => s && !s.startsWith("#"));
 }
 
-function isExcluded(path: string, rules: string[]): boolean {
-  // Never touch hidden files/folders (.obsidian, .trash, .git ...) on either side.
+function isExcluded(path: string, rules: string[], configDir: string): boolean {
+  // Never touch the vault config folder (usually .obsidian, but user-configurable)
+  // or any hidden file/folder (.trash, .git ...) on either side.
+  if (configDir && (path === configDir || path.startsWith(configDir + "/"))) return true;
   if (path.split("/").some((seg) => seg.startsWith("."))) return true;
   const name = path.split("/").pop() ?? path;
   return rules.some((r) => {
@@ -80,13 +82,14 @@ export async function runSync(
   const res: SyncResult = { uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0, conflicts: [], errors: [], warnings: [], skipped: [] };
   const maxBytes = Math.max(0, settings.maxFileSizeMB) * 1024 * 1024;
   const rules = parseExcludes(settings.excludes);
+  const configDir = vault.configDir;
 
   const rootId = await drive.ensureFolderPath(settings.remoteFolder);
   const tree: RemoteTree = await drive.listTree(rootId);
   res.warnings.push(...tree.warnings);
 
   const local = new Map<string, TFile>();
-  for (const f of vault.getFiles()) if (!isExcluded(f.path, rules)) local.set(f.path, f);
+  for (const f of vault.getFiles()) if (!isExcluded(f.path, rules, configDir)) local.set(f.path, f);
   const remote = tree.files;
 
   // ---- helpers ------------------------------------------------------------
@@ -171,7 +174,7 @@ export async function runSync(
       lastCheckpointWork = work();
       lastCheckpointAt = Date.now();
     }
-    if (isExcluded(path, rules)) continue;
+    if (isExcluded(path, rules, configDir)) continue;
     try {
       const l = local.get(path);
       const r = remote.get(path);

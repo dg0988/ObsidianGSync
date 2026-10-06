@@ -24,7 +24,7 @@ export const DEFAULT_SETTINGS: GSyncSettings = {
   autoSyncMinutes: 10,
   syncOnStartup: true,
   propagateDeletes: true,
-  excludes: "# One rule per line. Hidden files/folders (.obsidian etc.) are always skipped.\n# Examples:  Templates/   *.tmp   desktop.ini\ndesktop.ini\nThumbs.db\n",
+  excludes: "# One rule per line. Hidden files/folders and the vault config folder are always skipped.\n# Examples:  Templates/   *.tmp   desktop.ini\ndesktop.ini\nThumbs.db\n",
   maxFileSizeMB: 25,
 };
 
@@ -34,9 +34,15 @@ export class GSyncSettingTab extends PluginSettingTab {
   }
 
   display(): void {
+    this.refresh();
+  }
+
+  /** Rebuilds the settings UI (also called after sign-in completes). */
+  refresh(): void {
     const { containerEl } = this;
     const s = this.plugin.settings;
     containerEl.empty();
+    void this.plugin.prepareSignInLink();
 
     new Setting(containerEl).setName("Google account").setHeading();
 
@@ -47,6 +53,7 @@ export class GSyncSettingTab extends PluginSettingTab {
         t.setValue(s.clientId).onChange(async (v) => {
           s.clientId = v.trim();
           await this.plugin.saveAll();
+          void this.plugin.prepareSignInLink();
         })
       );
 
@@ -66,12 +73,12 @@ export class GSyncSettingTab extends PluginSettingTab {
       b
         .setButtonText(s.refreshToken ? "Sign in again" : "Sign in with Google")
         .setCta()
-        .onClick(async () => {
+        .onClick(() => {
           if (!s.clientId || !s.clientSecret) {
             new Notice("Enter the client ID and secret first.");
             return;
           }
-          await this.plugin.startSignIn();
+          this.plugin.startSignIn();
         })
     );
 
@@ -83,11 +90,11 @@ export class GSyncSettingTab extends PluginSettingTab {
         })
       );
       status.addButton((b) =>
-        b.setButtonText("Sign out").setWarning().onClick(async () => {
+        b.setButtonText("Sign out").onClick(async () => {
           s.refreshToken = "";
           this.plugin.setAccessToken("", 0);
           await this.plugin.saveAll();
-          this.display();
+          this.refresh();
         })
       );
     }
@@ -111,6 +118,7 @@ export class GSyncSettingTab extends PluginSettingTab {
         t.setValue(s.redirectUri).onChange(async (v) => {
           s.redirectUri = v.trim() || DEFAULT_REDIRECT;
           await this.plugin.saveAll();
+          void this.plugin.prepareSignInLink();
         })
       );
 

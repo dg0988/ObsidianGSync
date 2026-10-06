@@ -20,6 +20,11 @@ export interface RemoteTree {
   warnings: string[];
 }
 
+interface FileList {
+  files: RemoteFile[];
+  nextPageToken?: string;
+}
+
 function q(s: string): string {
   return s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
@@ -72,8 +77,9 @@ export class DriveClient {
       });
       if (pageToken) params.set("pageToken", pageToken);
       const r = await this.req(`${API}/files?${params.toString()}`);
-      out.push(...(r.json.files as RemoteFile[]));
-      pageToken = r.json.nextPageToken ?? "";
+      const body = r.json as FileList;
+      out.push(...body.files);
+      pageToken = body.nextPageToken ?? "";
     } while (pageToken);
     return out;
   }
@@ -84,20 +90,20 @@ export class DriveClient {
       contentType: "application/json",
       body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }),
     });
-    return r.json.id;
+    return (r.json as RemoteFile).id;
   }
 
   /** Resolve a path like "Obsidian/My Vault" under My Drive, creating missing folders. */
   async ensureFolderPath(path: string): Promise<string> {
     let parent = "root";
-    for (const name of path.split(/[\/\\]/).map((s) => s.trim()).filter(Boolean)) {
+    for (const name of path.split(/[/\\]/).map((s) => s.trim()).filter(Boolean)) {
       const params = new URLSearchParams({
         q: `'${q(parent)}' in parents and name = '${q(name)}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
         fields: "files(id)",
         spaces: "drive",
       });
       const r = await this.req(`${API}/files?${params.toString()}`);
-      const found = r.json.files as { id: string }[];
+      const found = (r.json as FileList).files;
       parent = found.length ? found[0].id : await this.createFolder(name, parent);
     }
     return parent;

@@ -1,5 +1,5 @@
 import { Notice, ObsidianProtocolData, Platform, Plugin } from "obsidian";
-import { beginSignIn, exchangeCode, isPendingValid, PendingAuth, PROTOCOL_ACTION, refreshAccessToken } from "./auth";
+import { exchangeCode, isPendingValid, PendingAuth, prepareSignIn, PreparedSignIn, PROTOCOL_ACTION, refreshAccessToken } from "./auth";
 import { DriveClient } from "./drive";
 import { DEFAULT_SETTINGS, GSyncSettings, GSyncSettingTab } from "./settings";
 import { runSync, SyncState } from "./sync";
@@ -20,6 +20,7 @@ export default class GSyncPlugin extends Plugin {
   private syncInProgress = false;
   private interruptedLastTime = false;
   private pendingAuth: PendingAuth | null = null;
+  private prepared: PreparedSignIn | null = null;
   private autoSyncId: number | null = null;
   private statusEl!: HTMLElement;
   private settingTab!: GSyncSettingTab;
@@ -39,8 +40,8 @@ export default class GSyncPlugin extends Plugin {
     this.statusEl = this.addStatusBarItem();
     this.setStatus("GSync: idle");
 
-    this.addRibbonIcon("refresh-cw", "Sync with Google Drive", () => this.sync(false));
-    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.sync(false) });
+    this.addRibbonIcon("refresh-cw", "Sync with Google Drive", () => void this.sync(false));
+    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.sync(false) });
 
     // Google -> callback.html -> obsidian://gsync-auth?code=...&state=...
     this.registerObsidianProtocolHandler(PROTOCOL_ACTION, (params) => {
@@ -53,7 +54,7 @@ export default class GSyncPlugin extends Plugin {
         return;
       }
       if (this.settings.syncOnStartup && this.settings.refreshToken) {
-        window.setTimeout(() => this.sync(true), 5000);
+        window.setTimeout(() => void this.sync(true), 5000);
       }
     });
     this.scheduleAutoSync();
@@ -65,17 +66,47 @@ export default class GSyncPlugin extends Plugin {
       state: this.state,
       syncInProgress: this.syncInProgress,
       pendingAuth: this.pendingAuth,
-    } as PluginData);
+    } satisfies PluginData);
   }
 
-  async startSignIn() {
+  /** Called when the settings tab opens, so the tap can open the browser instantly. */
+  async prepareSignInLink(): Promise<void> {
+    const { clientId, redirectUri } = this.settings;
+    if (!clientId) return;
+    const fresh =
+      this.prepared &&
+      this.prepared.url.includes(encodeURIComponent(clientId)) &&
+      this.prepared.pending.redirectUri === redirectUri &&
+      isPendingValid(this.prepared.pending);
+    if (fresh) return;
     try {
-      this.pendingAuth = await beginSignIn(this.settings.clientId, this.settings.redirectUri, this.app.vault.getName());
-      await this.saveAll(); // survives the app being closed while the browser is open
-      new Notice("Finish signing in in your browser. It will send you back to Obsidian.", 10000);
+      this.prepared = await prepareSignIn(clientId, redirectUri, this.app.vault.getName());
     } catch (e) {
-      new Notice(`Sign-in failed: ${(e as Error).message}`, 10000);
+      console.error("[gsync] could not prepare sign-in", e);
+      this.prepared = null;
     }
+  }
+
+  /** Must run synchronously inside the button tap (no await before window.open). */
+  startSignIn(): void {
+    const p = this.prepared;
+    if (!p || !p.url.includes(encodeURIComponent(this.settings.clientId)) || p.pending.redirectUri !== this.settings.redirectUri) {
+      new Notice("Preparing sign-in… tap Sign in with Google again in a moment.");
+      void this.prepareSignInLink();
+      return;
+    }
+    const win = window.open(p.url);
+    this.pendingAuth = p.pending;
+    this.prepared = null; // each attempt gets fresh codes
+    if (win === null) {
+      // Browser was blocked: hand the link over another way.
+      void navigator.clipboard.writeText(p.url).catch(() => undefined);
+      new Notice("Couldn't open your browser. The sign-in link was copied: paste it into Safari or Chrome.", 15000);
+    } else {
+      new Notice("Finish signing in in your browser. It will send you back to Obsidian.", 10000);
+    }
+    void this.saveAll(); // survives the app being closed while the browser is open
+    void this.prepareSignInLink(); // ready for a retry
   }
 
   private async finishSignIn(params: ObsidianProtocolData) {
@@ -94,7 +125,7 @@ export default class GSyncPlugin extends Plugin {
     } finally {
       this.pendingAuth = null;
       await this.saveAll();
-      this.settingTab.display();
+      this.settingTab.refresh();
     }
   }
 
@@ -117,7 +148,7 @@ export default class GSyncPlugin extends Plugin {
     this.autoSyncId = null;
     const mins = this.settings.autoSyncMinutes;
     if (mins > 0) {
-      this.autoSyncId = window.setInterval(() => this.sync(true), mins * 60 * 1000);
+      this.autoSyncId = window.setInterval(() => void this.sync(true), mins * 60 * 1000);
       this.registerInterval(this.autoSyncId);
     }
   }

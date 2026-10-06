@@ -23,6 +23,12 @@ export interface PendingAuth {
   createdAt: number;
 }
 
+interface TokenResponse {
+  access_token: string;
+  expires_in: number;
+  refresh_token?: string;
+}
+
 function base64url(bytes: Uint8Array): string {
   let s = "";
   bytes.forEach((b) => (s += String.fromCharCode(b)));
@@ -35,12 +41,18 @@ function formBody(o: Record<string, string>): string {
     .join("&");
 }
 
+export interface PreparedSignIn {
+  url: string;
+  pending: PendingAuth;
+}
+
 /**
- * Opens Google's consent page in the browser. Google redirects to the static
- * callback page, which hands the code back via obsidian://gsync-auth.
+ * Builds the Google consent URL ahead of time. Mobile browsers only allow
+ * opening a new page synchronously inside a tap, so the async crypto work
+ * must be finished before the user taps "Sign in with Google".
  * The vault name rides along in `state` so the right vault is reopened.
  */
-export async function beginSignIn(clientId: string, redirectUri: string, vaultName: string): Promise<PendingAuth> {
+export async function prepareSignIn(clientId: string, redirectUri: string, vaultName: string): Promise<PreparedSignIn> {
   const verifier = base64url(crypto.getRandomValues(new Uint8Array(32)));
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
   const challenge = base64url(new Uint8Array(digest));
@@ -58,8 +70,10 @@ export async function beginSignIn(clientId: string, redirectUri: string, vaultNa
     prompt: "consent",
     state,
   });
-  window.open(`${AUTH_URL}?${params.toString()}`);
-  return { verifier, state, redirectUri, createdAt: Date.now() };
+  return {
+    url: `${AUTH_URL}?${params.toString()}`,
+    pending: { verifier, state, redirectUri, createdAt: Date.now() },
+  };
 }
 
 export function isPendingValid(p: PendingAuth | null | undefined): p is PendingAuth {
@@ -87,7 +101,7 @@ export async function exchangeCode(
     throw: false,
   });
   if (r.status !== 200) throw new Error(`Token exchange failed (${r.status}): ${r.text}`);
-  const j = r.json;
+  const j = r.json as TokenResponse;
   if (!j.refresh_token) {
     throw new Error("Google did not return a refresh token. Remove the app at myaccount.google.com/permissions and sign in again.");
   }
@@ -126,6 +140,6 @@ export async function refreshAccessToken(
     }
     throw new Error(`Token refresh failed (${r.status}): ${r.text}`);
   }
-  const j = r.json;
+  const j = r.json as TokenResponse;
   return { accessToken: j.access_token, expiresAt: Date.now() + (j.expires_in - 60) * 1000 };
 }
