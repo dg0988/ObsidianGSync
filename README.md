@@ -25,6 +25,8 @@ Works on **Windows, macOS, Linux, Android, and iPad/iPhone**, including mobile d
   - `accounts.google.com` and `oauth2.googleapis.com`: Google sign-in and refreshing access tokens.
   - `www.googleapis.com`: the Google Drive API, to list, download, upload, and trash files in the folder you choose.
   - `dg0988.github.io` (only during sign-in, and only if you keep the default redirect page): a static page in this repository ([`docs/callback.html`](docs/callback.html)) that hands Google's one-time sign-in code back to Obsidian through an `obsidian://` link. It has no server-side code and stores nothing. You can host your own copy instead.
+- **Vault access.** To compare your vault with Drive, GSync lists every file in the vault (except excluded files, hidden files, and the vault's config folder) and reads or writes only the files it syncs.
+- **Clipboard.** GSync only *writes* to the clipboard, and only when you ask: the **Copy refresh token** button, or copying the sign-in link if your browser can't be opened. It never reads the clipboard.
 - No telemetry, analytics, or ads. Nothing is sent anywhere except Google.
 
 ---
@@ -206,9 +208,17 @@ npm run build   # type-check + production build -> main.js
 
 ### Releasing
 
-1. Update `version` in `manifest.json` and `package.json`, and add it to `versions.json` (mapped to `minAppVersion`).
-2. Run `npm run build` and commit.
-3. Create a GitHub release whose tag exactly matches the version (e.g. `1.0.1`, no `v`), and attach `main.js` and `manifest.json`.
+Releases are built and signed by GitHub Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)), so the published `main.js` has a verifiable [build provenance attestation](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds).
+
+1. Update `version` in `manifest.json` and `package.json`, and add it to `versions.json`.
+2. Commit and push.
+3. Publish a GitHub release with a new tag that exactly matches the version (e.g. `1.0.3`, no `v`). Don't attach files: the workflow builds `main.js` from the tagged source, attests it, and attaches `main.js` and `manifest.json`.
+
+To verify a downloaded `main.js`:
+
+```
+gh attestation verify main.js --repo dg0988/ObsidianGSync
+```
 
 ---
 
