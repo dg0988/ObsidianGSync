@@ -4,6 +4,8 @@ Two-way sync between an Obsidian vault and a folder in Google Drive, using the G
 
 Works on **Windows, macOS, Linux, Android, and iPad/iPhone**, including mobile devices that can't run Google Drive for Desktop.
 
+**Available in Obsidian's Community plugins:** [community.obsidian.md/plugins/gsync](https://community.obsidian.md/plugins/gsync)
+
 ---
 
 ## Features
@@ -15,6 +17,28 @@ Works on **Windows, macOS, Linux, Android, and iPad/iPhone**, including mobile d
 - **Leaves device settings alone**: hidden folders like `.obsidian`, `.trash`, and `.git` are never synced, so each device keeps its own settings and plugins.
 - **Mobile-friendly**: progress is saved every 10 files, large files can be skipped, and an interrupted sync resumes where it stopped.
 - **Your own Google credentials**: you create your own OAuth client. No third-party server stores your data or tokens.
+
+---
+
+## Why GSync?
+
+Many Google Drive sync plugins expect to own their Drive folder: start from an empty vault, sync only through the plugin, and nothing else may touch the folder. GSync is built for the opposite case. Your notes already live in Google Drive, and you want them on your phone and tablet too.
+
+- **Works alongside Google Drive for Desktop and existing folders.** GSync sees every file in the folder you choose, however it got there: uploaded by Drive for Desktop, added through the Drive website, or synced by GSync from another device.
+- **No empty-vault requirement.** Point GSync at a vault that already has notes and a Drive folder that already has notes. The first sync compares contents and only transfers what differs.
+- **Catches edits made outside Obsidian.** Changes are detected by comparing files on every sync (timestamps, sizes, and Drive checksums), not by watching edits inside the app. Files changed by another editor, a script, or while Obsidian was closed are still picked up.
+- **Never silently picks a winner.** When a note changed on both sides, you keep both versions: yours keeps the name, and the Drive version is saved beside it as a conflict copy.
+- **Safe to interrupt.** Progress is saved every 10 files. If the app closes, crashes, or loses its connection mid-sync, the next sync resumes where it stopped.
+- **No middleman server.** Files and tokens go directly between your device and Google, using your own Google OAuth client. The only other piece is a static redirect page used during sign-in, which you can host yourself.
+- **Full two-way sync, automatically.** Every sync runs in both directions: on startup, on a timer, or when you tap Sync now.
+
+### When something else may fit better
+
+GSync makes deliberate trade-offs:
+
+- **Setup takes about 10 minutes**, because you create your own Google Cloud OAuth client. Plugins that sign you in through their own service are quicker to set up, in exchange for routing sign-in through the developer's server.
+- **Settings and plugins aren't synced.** GSync never touches your vault's configuration folder, so each device keeps its own settings, plugins, and themes. If you want identical settings everywhere, you'll need another tool for that part.
+- **The Drive folder is found by its path.** If you rename or move the folder in Google Drive, update the path in GSync's settings.
 
 ---
 
@@ -67,13 +91,18 @@ Also disable any other sync plugin that points at the same folder.
 
 ## 2. Install
 
-### From Community plugins
+### From Community plugins (recommended)
 
-**Settings → Community plugins → Browse**, search **GSync**, install and enable.
+GSync is published in Obsidian's community directory: [community.obsidian.md/plugins/gsync](https://community.obsidian.md/plugins/gsync)
+
+- On the directory page, click **Add to Obsidian**, or
+- In Obsidian, go to **Settings → Community plugins → Browse**, search **GSync**, then install and enable it.
+
+Updates arrive through Obsidian's built-in plugin updates.
 
 ### With BRAT (beta versions)
 
-Install **BRAT** from Community plugins, then **Add beta plugin** → `dg0988/ObsidianGSync`.
+Only needed if you want to test unreleased versions. Install **BRAT** from Community plugins, then **Add beta plugin** → `dg0988/ObsidianGSync`.
 
 ### Manual
 
