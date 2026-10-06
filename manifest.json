@@ -1,7 +1,7 @@
 {
   "id": "gsync",
   "name": "GSync",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "minAppVersion": "1.6.6",
   "description": "Two-way sync between your vault and a Google Drive folder using the Google Drive API. Works on desktop and mobile.",
   "author": "dg0988",

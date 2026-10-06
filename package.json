@@ -1,6 +1,6 @@
 {
   "name": "gsync",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "GSync: two-way sync between an Obsidian vault and Google Drive",
   "main": "main.js",
   "scripts": {
