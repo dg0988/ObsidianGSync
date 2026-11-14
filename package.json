@@ -1,12 +1,13 @@
 {
   "name": "gsync",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "GSync: two-way sync between an Obsidian vault and Google Drive",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc --noEmit && node esbuild.config.mjs production",
-    "lint": "eslint src"
+    "lint": "eslint src",
+    "test": "node tests/run.mjs"
   },
   "keywords": [],
   "author": "",

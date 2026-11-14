@@ -1,6 +1,7 @@
-import { App, TFile } from "obsidian";
+import { App, TFile, Platform } from "obsidian";
 import { DriveClient, RemoteFile, RemoteTree } from "./drive";
 import { GSyncSettings } from "./settings";
+import { AndroidFiles } from "./android-files";
 
 /** What both sides looked like the last time this path was in sync. */
 export interface SyncRecord {
@@ -83,6 +84,8 @@ export async function runSync(
   const maxBytes = Math.max(0, settings.maxFileSizeMB) * 1024 * 1024;
   const rules = parseExcludes(settings.excludes);
   const configDir = vault.configDir;
+  const android = Platform.isAndroidApp ? new AndroidFiles(vault.adapter, configDir) : null;
+  if (android) res.warnings.push(...await android.recover());
 
   const rootId = await drive.ensureFolderPath(settings.remoteFolder);
   const tree: RemoteTree = await drive.listTree(rootId);
@@ -139,9 +142,58 @@ export async function runSync(
     return drive.createFile(name, parentId, data);
   };
 
+  const downloadLocal = async (path: string, remote: RemoteFile) => {
+    if (!android) return writeLocal(path, await drive.download(remote.id));
+    const expected = await vault.adapter.stat(path);
+    const staged = await android.stage(drive.downloadChunks(remote));
+    try { await staged.install(path, expected); }
+    finally { await staged.dispose(); }
+  };
+
+  const uploadLocal = async (path: string, remoteId?: string): Promise<RemoteFile> => {
+    if (!android) {
+      const file = vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) throw new Error("Local file missing");
+      const data = await vault.readBinary(file);
+      return remoteId ? drive.updateFile(remoteId, data) : uploadNew(path, data);
+    }
+    const expected = await vault.adapter.stat(path);
+    if (!expected) throw new Error("Local file missing");
+    const target = remoteId ? { id: remoteId } : {
+      name: path.split("/").pop() as string, parentId: await ensureRemoteParent(path),
+    };
+    await android.assertUnchanged(path, expected);
+    const uploaded = await drive.uploadChunks(expected.size, android.readChunks(path), target);
+    await android.assertUnchanged(path, expected);
+    return uploaded;
+  };
+
   const localChangedSince = (f: TFile, s: SyncRecord) => f.stat.mtime !== s.localMtime || f.stat.size !== s.localSize;
 
   const resolveBothChanged = async (path: string, l: TFile, r: RemoteFile) => {
+    if (android) {
+      const expected = await vault.adapter.stat(path);
+      const staged = await android.stage(drive.downloadChunks(r));
+      try {
+        const equal = await android.equal(path, staged.path);
+        await android.assertUnchanged(path, expected);
+        if (equal) { await record(path, r); return; }
+        let cPath = conflictPath(path);
+        while (await vault.adapter.exists(cPath) || tree.files.has(cPath)) {
+          const suffix = "-" + crypto.randomUUID();
+          const dot = cPath.lastIndexOf(".");
+          cPath = dot > cPath.lastIndexOf("/") ? cPath.slice(0, dot) + suffix + cPath.slice(dot) : cPath + suffix;
+        }
+        await staged.install(cPath, null);
+        const cRemote = await uploadLocal(cPath);
+        await record(cPath, cRemote);
+        await android.assertUnchanged(path, expected);
+        const updated = await uploadLocal(path, r.id);
+        await record(path, updated);
+        res.conflicts.push(path);
+        return;
+      } finally { await staged.dispose(); }
+    }
     const [ld, rd] = await Promise.all([vault.readBinary(l), drive.download(r.id)]);
     if (sameBytes(ld, rd)) {
       await record(path, r);
@@ -175,6 +227,10 @@ export async function runSync(
       lastCheckpointAt = Date.now();
     }
     if (isExcluded(path, rules, configDir)) continue;
+    if (android?.blockedPaths.has(path)) {
+      res.errors.push(`${path}: interrupted transfer needs recovery before syncing`);
+      continue;
+    }
     try {
       const l = local.get(path);
       const r = remote.get(path);
@@ -193,11 +249,11 @@ export async function runSync(
         const rChanged = rev(r) !== s.remoteRev || r.id !== s.remoteId;
         if (lChanged && rChanged) await resolveBothChanged(path, l, r);
         else if (lChanged) {
-          const updated = await drive.updateFile(r.id, await vault.readBinary(l));
+          const updated = await uploadLocal(path, r.id);
           await record(path, updated);
           res.uploaded++;
         } else if (rChanged) {
-          await writeLocal(path, await drive.download(r.id));
+          await downloadLocal(path, r);
           await record(path, r);
           res.downloaded++;
         }
@@ -207,7 +263,7 @@ export async function runSync(
           delete state[path];
           res.deletedLocal++;
         } else {
-          const created = await uploadNew(path, await vault.readBinary(l));
+          const created = await uploadLocal(path);
           await record(path, created);
           res.uploaded++;
         }
@@ -217,7 +273,7 @@ export async function runSync(
           delete state[path];
           res.deletedRemote++;
         } else {
-          await writeLocal(path, await drive.download(r.id));
+          await downloadLocal(path, r);
           await record(path, r);
           res.downloaded++;
         }
