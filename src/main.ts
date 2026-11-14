@@ -1,3 +1,4 @@
+import { SyncProgress } from "./progress";
 import { Notice, ObsidianProtocolData, Platform, Plugin } from "obsidian";
 import { exchangeCode, isPendingValid, PendingAuth, prepareSignIn, PreparedSignIn, PROTOCOL_ACTION, refreshAccessToken } from "./auth";
 import { DriveClient } from "./drive";
@@ -23,6 +24,9 @@ export default class GSyncPlugin extends Plugin {
   private prepared: PreparedSignIn | null = null;
   private autoSyncId: number | null = null;
   private statusEl!: HTMLElement;
+  private activeProgress: SyncProgress | null = null;
+  private progressNotice: Notice | null = null;
+  private progressLastPaint = 0;
   private settingTab!: GSyncSettingTab;
   private drive = new DriveClient(() => this.getAccessToken());
 
@@ -42,6 +46,9 @@ export default class GSyncPlugin extends Plugin {
 
     this.addRibbonIcon("refresh-cw", "Sync with Google Drive", () => void this.sync(false));
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.sync(false) });
+
+    this.addCommand({ id: "show-sync-progress", name: "Show sync progress", callback: () => this.showSyncProgress() });
+    this.register(() => this.progressNotice?.hide());
 
     // Google -> callback.html -> obsidian://gsync-auth?code=...&state=...
     this.registerObsidianProtocolHandler(PROTOCOL_ACTION, (params) => {
@@ -157,6 +164,23 @@ export default class GSyncPlugin extends Plugin {
     this.statusEl.setText(text);
   }
 
+  private showSyncProgress() {
+    if (!this.activeProgress) { new Notice("No sync in progress."); return; }
+    this.progressNotice?.hide();
+    this.progressNotice = new Notice(this.activeProgress.text(), 0);
+  }
+
+  private renderProgress(force = false, showNotice = false) {
+    if (!this.activeProgress) return;
+    const now = performance.now();
+    if (!force && now - this.progressLastPaint < 250) return;
+    this.progressLastPaint = now;
+    const text = this.activeProgress.text();
+    this.setStatus(text.replace(/\n/g, " · "));
+    if (this.progressNotice) this.progressNotice.setMessage(text);
+    else if (showNotice && Platform.isMobile) this.showSyncProgress();
+  }
+
   async sync(quiet: boolean) {
     if (this.syncing) {
       if (!quiet) new Notice("Sync already running.");
@@ -172,18 +196,18 @@ export default class GSyncPlugin extends Plugin {
     this.interruptedLastTime = false;
     await this.saveAll();
     this.setStatus("GSync: syncing…");
-    let progressNotice: Notice | null = null;
+    this.activeProgress = new SyncProgress();
+    this.renderProgress(true, !quiet);
     try {
       const r = await runSync(this.app, this.drive, s, this.state, {
         checkpoint: () => this.saveAll(),
         progress: (done, total, transferred) => {
-          const msg = `GSync: syncing ${done}/${total}${transferred ? ` (${transferred} changed)` : ""}`;
-          this.setStatus(msg);
-          // Mobile has no status bar, so show a live notice once real work is happening.
-          if (Platform.isMobile && (transferred > 0 || !quiet) && done < total) {
-            if (!progressNotice) progressNotice = new Notice(msg, 0);
-            else progressNotice.setMessage(msg);
-          }
+          this.activeProgress?.files(done, total);
+          this.renderProgress(done === total, transferred > 0 || !quiet);
+        },
+        transfer: (progress) => {
+          const changed = this.activeProgress?.transfer(progress);
+          this.renderProgress(changed, true);
         },
       });
       this.syncInProgress = false;
@@ -213,7 +237,9 @@ export default class GSyncPlugin extends Plugin {
       console.error("[gsync]", e);
       new Notice(`GSync failed: ${(e as Error).message}`, 15000);
     } finally {
-      (progressNotice as Notice | null)?.hide();
+      this.progressNotice?.hide();
+      this.progressNotice = null;
+      this.activeProgress = null;
       if (this.syncInProgress) {
         // Failed with an error (not a crash): nothing to resume-warn about.
         this.syncInProgress = false;

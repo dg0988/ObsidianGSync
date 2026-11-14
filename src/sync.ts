@@ -1,6 +1,7 @@
 import { App, TFile, Platform } from "obsidian";
 import { DriveClient, RemoteFile, RemoteTree } from "./drive";
 import { GSyncSettings } from "./settings";
+import type { TransferProgress } from "./progress";
 import { AndroidFiles } from "./android-files";
 
 /** What both sides looked like the last time this path was in sync. */
@@ -26,6 +27,7 @@ export interface SyncResult {
 export interface SyncHooks {
   /** Persist state mid-sync so a crash doesn't lose finished work. */
   checkpoint: () => Promise<void>;
+  transfer?: (progress: TransferProgress) => void;
   progress: (done: number, total: number, transferred: number) => void;
 }
 
@@ -142,16 +144,30 @@ export async function runSync(
     return drive.createFile(name, parentId, data);
   };
 
+  const downloading = (path: string, remote: RemoteFile) => {
+    hooks.transfer?.({ phase: "download", path, bytes: 0, total: Number(remote.size) });
+    return drive.downloadChunks(remote, (bytes, total) => hooks.transfer?.({ phase: "download", path, bytes, total }));
+  };
+
   const downloadLocal = async (path: string, remote: RemoteFile) => {
-    if (!android) return writeLocal(path, await drive.download(remote.id));
+    if (!android) {
+      hooks.transfer?.({ phase: "download", path });
+      const data = await drive.download(remote.id);
+      hooks.transfer?.({ phase: "install", path });
+      return writeLocal(path, data);
+    }
     const expected = await vault.adapter.stat(path);
-    const staged = await android.stage(drive.downloadChunks(remote));
-    try { await staged.install(path, expected); }
+    const staged = await android.stage(downloading(path, remote));
+    try {
+      hooks.transfer?.({ phase: "install", path });
+      await staged.install(path, expected);
+    }
     finally { await staged.dispose(); }
   };
 
   const uploadLocal = async (path: string, remoteId?: string): Promise<RemoteFile> => {
     if (!android) {
+      hooks.transfer?.({ phase: "upload", path });
       const file = vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) throw new Error("Local file missing");
       const data = await vault.readBinary(file);
@@ -163,7 +179,8 @@ export async function runSync(
       name: path.split("/").pop() as string, parentId: await ensureRemoteParent(path),
     };
     await android.assertUnchanged(path, expected);
-    const uploaded = await drive.uploadChunks(expected.size, android.readChunks(path), target);
+    const uploaded = await drive.uploadChunks(expected.size, android.readChunks(path), target,
+      (bytes, total) => hooks.transfer?.({ phase: "upload", path, bytes, total }));
     await android.assertUnchanged(path, expected);
     return uploaded;
   };
@@ -173,8 +190,9 @@ export async function runSync(
   const resolveBothChanged = async (path: string, l: TFile, r: RemoteFile) => {
     if (android) {
       const expected = await vault.adapter.stat(path);
-      const staged = await android.stage(drive.downloadChunks(r));
+      const staged = await android.stage(downloading(path, r));
       try {
+        hooks.transfer?.({ phase: "compare", path });
         const equal = await android.equal(path, staged.path);
         await android.assertUnchanged(path, expected);
         if (equal) { await record(path, r); return; }
@@ -184,6 +202,7 @@ export async function runSync(
           const dot = cPath.lastIndexOf(".");
           cPath = dot > cPath.lastIndexOf("/") ? cPath.slice(0, dot) + suffix + cPath.slice(dot) : cPath + suffix;
         }
+        hooks.transfer?.({ phase: "install", path: cPath });
         await staged.install(cPath, null);
         const cRemote = await uploadLocal(cPath);
         await record(cPath, cRemote);
@@ -194,6 +213,7 @@ export async function runSync(
         return;
       } finally { await staged.dispose(); }
     }
+    hooks.transfer?.({ phase: "compare", path });
     const [ld, rd] = await Promise.all([vault.readBinary(l), drive.download(r.id)]);
     if (sameBytes(ld, rd)) {
       await record(path, r);
@@ -201,9 +221,12 @@ export async function runSync(
     }
     // Keep both: local wins the original name, Drive's version is saved beside it.
     const cPath = conflictPath(path);
+    hooks.transfer?.({ phase: "install", path: cPath });
     await writeLocal(cPath, rd);
+    hooks.transfer?.({ phase: "upload", path: cPath });
     const cRemote = await uploadNew(cPath, rd);
     await record(cPath, cRemote);
+    hooks.transfer?.({ phase: "upload", path });
     const updated = await drive.updateFile(r.id, ld);
     await record(path, updated);
     res.conflicts.push(path);
@@ -219,7 +242,7 @@ export async function runSync(
 
   for (const path of paths) {
     done++;
-    if (done % 10 === 0) hooks.progress(done, paths.length, work());
+    hooks.progress(done - 1, paths.length, work());
     // Save progress every 10 transfers or 5 seconds.
     if (work() - lastCheckpointWork >= 10 || (work() > lastCheckpointWork && Date.now() - lastCheckpointAt > 5000)) {
       await hooks.checkpoint();

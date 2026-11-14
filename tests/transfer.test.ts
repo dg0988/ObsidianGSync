@@ -226,3 +226,32 @@ test('short recovery copy keeps journal and blocks syncing the affected target',
  const copy=adapter.copy.bind(adapter);adapter.copy=async(a,b)=>{if(a.endsWith('/original'))await adapter.write(b,'x');else await copy(a,b);};
  await files.recover();assert.ok(await adapter.exists(dir+'/journal.json'));assert.ok(files.blockedPaths.has('note.bin'));assert.equal(await adapter.read(dir+'/original'),'original');assert.equal(await adapter.read(dir+'/retained-target'),'partial');
 });
+
+import { SyncProgress } from '../src/progress';
+test('progress reports current bytes, percent and elapsed average speed',()=>{
+ let now=0;const p=new SyncProgress(()=>now);p.files(200,375);p.transfer({phase:'download',path:'books/file.pdf',bytes:0,total:4*chunkSize});now=2000;p.transfer({phase:'download',path:'books/file.pdf',bytes:chunkSize,total:4*chunkSize});
+ assert.match(p.text(),/200\/375/);assert.match(p.text(),/file.pdf/);assert.match(p.text(),/1.0 \/ 4.0 MiB/);assert.match(p.text(),/25%/);assert.match(p.text(),/0.50 MiB\/s/);
+});
+test('progress resets speed for a new file and labels local processing',()=>{
+ let now=0;const p=new SyncProgress(()=>now);p.transfer({phase:'download',path:'a',bytes:0,total:chunkSize});now=1000;p.transfer({phase:'download',path:'a',bytes:chunkSize,total:chunkSize});
+ p.transfer({phase:'upload',path:'b',bytes:0,total:chunkSize});assert.doesNotMatch(p.text(),/1.00 MiB\/s/);p.transfer({phase:'install',path:'b'});assert.match(p.text(),/Saving/);assert.doesNotMatch(p.text(),/MiB\/s/);
+});
+test('download progress counts bytes consumed by the caller',async()=>{
+ downloadMock();const progress:number[]=[];const drive=new DriveClient(async()=> 'fake');
+ for await(const _ of drive.downloadChunks(remote,(n)=>progress.push(n))){}
+ assert.deepEqual(progress,[0,chunkSize,2*chunkSize,bytes.length]);
+});
+test('upload progress counts acknowledgements instead of retransmitted bytes',async()=>{
+ const progress:number[]=[];let calls=0;
+ (globalThis as any).requestUrlMock=async(o:any)=>{
+  if(o.url.includes('uploadType='))return response(200,{},undefined,{location:'https://www.googleapis.com/upload/session-test'});
+  calls++;
+  if(calls<3)return response(308,{},undefined,{range:`bytes=0-${256*1024-1}`});
+  return response(200,{...remote,size:String(chunkSize)});
+ };
+ await new DriveClient(async()=> 'fake').uploadChunks(chunkSize,sourceOf(bytes.slice(0,chunkSize)),{id:'test'},(n)=>progress.push(n));
+ assert.deepEqual(progress,[0,256*1024,chunkSize]);
+});
+test('file progress clears the previous transfer and missing size never displays NaN',()=>{
+ const p=new SyncProgress();p.files(1,10);p.transfer({phase:'download',path:'a',bytes:0,total:NaN});assert.doesNotMatch(p.text(),/NaN/);p.files(2,10);assert.doesNotMatch(p.text(),/Downloading/);assert.match(p.text(),/2\/10/);
+});

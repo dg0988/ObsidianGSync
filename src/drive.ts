@@ -1,6 +1,6 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
 
-import { downloadChunks, uploadChunks, BinarySource } from "./drive-transfer";
+import { downloadChunks, uploadChunks, BinarySource, ByteProgress } from "./drive-transfer";
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
@@ -138,12 +138,12 @@ export class DriveClient {
     return { files, folders, warnings };
   }
 
-  downloadChunks(file: RemoteFile): AsyncGenerator<ArrayBuffer> {
-    return downloadChunks((url, options) => this.req(url, options), file);
+  downloadChunks(file: RemoteFile, onProgress?: ByteProgress): AsyncGenerator<ArrayBuffer> {
+    return downloadChunks((url, options) => this.req(url, options), file, onProgress);
   }
 
-  uploadChunks(size: number, chunks: BinarySource, target: { name: string; parentId: string } | { id: string }): Promise<RemoteFile> {
-    return uploadChunks((url, options) => this.req(url, options), size, chunks, target);
+  uploadChunks(size: number, chunks: BinarySource, target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress): Promise<RemoteFile> {
+    return uploadChunks((url, options) => this.req(url, options), size, chunks, target, onProgress);
   }
 
   async download(id: string): Promise<ArrayBuffer> {

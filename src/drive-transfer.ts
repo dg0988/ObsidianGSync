@@ -2,6 +2,7 @@ import type { RequestUrlResponse } from 'obsidian';
 import type { RemoteFile } from './drive';
 
 export const TRANSFER_CHUNK_SIZE = 1024 * 1024;
+export type ByteProgress = (bytes: number, total: number) => void;
 export type BinarySource = AsyncIterable<ArrayBuffer>;
 export type TransferRequest = (url: string, options?: {
   method?: string; body?: string | ArrayBuffer; contentType?: string;
@@ -21,11 +22,12 @@ function unchanged(a: RemoteFile, b: RemoteFile): boolean {
   return a.id === b.id && a.size === b.size && a.modifiedTime === b.modifiedTime &&
     a.md5Checksum === b.md5Checksum && a.version === b.version;
 }
-export async function* downloadChunks(req: TransferRequest, expected: RemoteFile): AsyncGenerator<ArrayBuffer> {
+export async function* downloadChunks(req: TransferRequest, expected: RemoteFile, onProgress?: ByteProgress): AsyncGenerator<ArrayBuffer> {
   const url = `${API}/${encodeURIComponent(expected.id)}`;
   const current = async () => (await req(`${url}?fields=${FIELDS}`)).json as RemoteFile;
   if (!unchanged(expected, await current())) throw new Error('Remote file changed before download; retry sync');
   const size = fileSize(expected);
+  onProgress?.(0, size);
   for (let start = 0; start < size; start += TRANSFER_CHUNK_SIZE) {
     const end = Math.min(size - 1, start + TRANSFER_CHUNK_SIZE - 1);
     const r = await req(`${url}?alt=media`, { headers: { Range: `bytes=${start}-${end}`, 'Accept-Encoding': 'identity' } });
@@ -34,14 +36,16 @@ export async function* downloadChunks(req: TransferRequest, expected: RemoteFile
     }
     if (r.arrayBuffer.byteLength !== end - start + 1) throw new Error('Incomplete download range');
     yield r.arrayBuffer;
+    onProgress?.(end + 1, size);
   }
   if (!unchanged(expected, await current())) throw new Error('Remote file changed during download; retry sync');
 }
 
 /** A session URL is a credential: never include it or response bodies in errors. */
 export async function uploadChunks(req: TransferRequest, size: number, chunks: BinarySource,
-  target: { name: string; parentId: string } | { id: string }): Promise<RemoteFile> {
+  target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress): Promise<RemoteFile> {
   if (!Number.isSafeInteger(size) || size < 0) throw new Error('Invalid upload size');
+  onProgress?.(0, size);
   const updating = 'id' in target;
   const start = await req(`https://www.googleapis.com/upload/drive/v3/files${updating ? '/' + encodeURIComponent(target.id) : ''}?uploadType=resumable&fields=${FIELDS}`, {
     method: updating ? 'PATCH' : 'POST', contentType: 'application/json',
@@ -75,6 +79,7 @@ export async function uploadChunks(req: TransferRequest, size: number, chunks: B
         if (end !== size) throw new Error('Drive completed upload before all bytes were sent');
         completed = r.json as RemoteFile;
         if (Number(completed.size) !== size) throw new Error('Uploaded size does not match local file');
+        onProgress?.(size, size);
         break;
       }
       if (r.status !== 308) throw new Error(`Unexpected upload status ${r.status}`);
@@ -83,6 +88,7 @@ export async function uploadChunks(req: TransferRequest, size: number, chunks: B
       const next = range === undefined ? 0 : match ? Number(match[1]) + 1 : NaN;
       if (!Number.isSafeInteger(next) || next < acknowledged || next > end) throw new Error('Invalid upload acknowledgement');
       if (next === acknowledged && ++failures > 4) throw new Error('Upload made no progress');
+      if (next > acknowledged) onProgress?.(next, size);
       acknowledged = next;
       if (acknowledged === size) throw new Error('Drive did not finalize upload');
     }
