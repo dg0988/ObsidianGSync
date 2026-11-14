@@ -49,3 +49,17 @@ in a working vault just to test it.
 References:
 - https://developers.google.com/workspace/drive/api/guides/manage-downloads
 - https://developers.google.com/workspace/drive/api/guides/manage-uploads
+
+## Device result
+
+One successful sync was confirmed on a Samsung Galaxy S25 FE running Obsidian
+1.15.1 with this experimental 1.0.5 build and a 35 MiB file limit. The original
+1.0.4 failure involved a 34.5 MiB PDF and a Java OutOfMemoryError in
+requestUrlAndroid -> Base64.encodeToString with a 256 MiB growth limit.
+
+The patched run completed without errors according to the user. Its recorded
+logcat contained no OOM or fatal crash messages. Across 29 samples, the main
+process maximum PSS was 250895 KiB and maximum Java Heap PSS was 35140 KiB.
+These are sampled page-accounting metrics, not precise live-heap measurements.
+Repeated runs, unrestricted sizes, larger files, uploads, conflicts and
+interruption recovery still need device validation.
