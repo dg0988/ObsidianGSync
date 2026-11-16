@@ -333,3 +333,129 @@ test('unsupported byte limits are rejected before opening requests or local stre
   await assert.rejects(async()=>{for await(const _ of files.readChunks('missing',limit)){}},/Unsupported/);
  }
 });
+
+import { createHash } from 'node:crypto';
+import { Platform } from 'obsidian';
+const sha256Of=(data:Uint8Array)=>createHash('sha256').update(data).digest('hex');
+async function checksumFixture(data=bytes,checksum:unknown=sha256Of(data)){
+ const f=await syncFixture(data);const tree=await f.drive.listTree();const r:any=tree.files.get('note.bin')!;
+ r.size=String(data.length);r.sha256Checksum=checksum;
+ f.drive.listTree=async()=>tree;
+ let downloads=0,metadata=0,reads=0;
+ const original=f.drive.downloadChunks;
+ f.drive.downloadChunks=()=>{downloads++;return original();};
+ (f.drive as any).getFile=async()=>{metadata++;return {...r};};
+ const oldFetch=globalThis.fetch;globalThis.fetch=async(...args:Parameters<typeof fetch>)=>{reads++;return oldFetch(...args);};
+ return {...f,r,counts:()=>({downloads,metadata,reads})};
+}
+for(const android of [true,false])test(`SHA match skips cloud contents on ${android?'Android':'desktop/iOS'} without state migration`,async()=>{
+ const f=await checksumFixture();const state:any={};const phases:string[]=[];Platform.isAndroidApp=android;
+ try{
+  const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,{...hooks,transfer:p=>phases.push(p.phase)});
+  assert.deepEqual(result.errors,[]);assert.deepEqual(result.conflicts,[]);assert.equal(f.counts().downloads,0);assert.equal(f.counts().metadata,1);
+  assert.deepEqual(state['note.bin'],{remoteId:'test',remoteRev:remote.md5Checksum,localMtime:(await f.adapter.stat('note.bin'))!.mtime,localSize:bytes.length});
+  assert.ok(phases.includes('hash'));assert.equal(f.uploaded.length,0);
+ }finally{Platform.isAndroidApp=true;f.restore();}
+});
+test('empty files and SHA known vector compare without downloading',async()=>{
+ for(const data of [new Uint8Array(),new TextEncoder().encode('abc')]){
+  const f=await checksumFixture(data);const state:any={};
+  try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.deepEqual(result.errors,[]);assert.equal(f.counts().downloads,0);assert.equal(state['note.bin'].localSize,data.length);}finally{f.restore();}
+ }
+});
+test('SHA mismatch preserves both versions without an extra byte comparison',async()=>{
+ const local=bytes.slice();local[0]^=255;const f=await checksumFixture(local,sha256Of(bytes));
+ const read=globalThis.fetch;globalThis.fetch=async(url:any,options:any)=>{assert.ok(!String(url).includes('/transfers/'),'must not read staged contents for comparison');return read(url,options);};
+ // Conflict upload legitimately reads staging only after installation to a visible path.
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,{},hooks);assert.deepEqual(result.errors,[]);assert.deepEqual(result.conflicts,['note.bin']);assert.equal(f.counts().downloads,1);assert.deepEqual(f.uploaded.map(v=>v.bytes),[Buffer.from(bytes),Buffer.from(local)]);}finally{f.restore();}
+});
+test('different sizes skip hashing and byte comparison but preserve the remote conflict',async()=>{
+ const f=await checksumFixture(new Uint8Array([1,2,3]),sha256Of(bytes));f.r.size=String(bytes.length);const phases:string[]=[];
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,{}, {...hooks,transfer:p=>phases.push(p.phase)});assert.deepEqual(result.errors,[]);assert.deepEqual(result.conflicts,['note.bin']);assert.ok(!phases.includes('hash'));assert.ok(!phases.includes('compare'));assert.equal(f.counts().metadata,0);}finally{f.restore();}
+});
+test('missing or malformed SHA falls back to existing exact comparison',async()=>{
+ for(const checksum of [undefined,null,'','a'.repeat(63),'z'.repeat(64),123]){
+  const f=await checksumFixture(bytes,checksum);f.r.sha256Checksum=checksum;const state:any={};
+  try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.deepEqual(result.errors,[]);assert.equal(f.counts().downloads,1);assert.equal(f.counts().metadata,0);assert.equal(f.uploaded.length,0);assert.ok(state['note.bin']);}finally{f.restore();}
+ }
+});
+test('unchanged tracked files skip both hashing and media requests',async()=>{
+ const f=await checksumFixture();const stat=await f.adapter.stat('note.bin');const state:any={'note.bin':{remoteId:'test',remoteRev:remote.md5Checksum,localMtime:stat!.mtime,localSize:stat!.size}};
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.deepEqual(result.errors,[]);assert.deepEqual(f.counts(),{downloads:0,metadata:0,reads:0});}finally{f.restore();}
+});
+test('simultaneous changes with identical SHA update the existing record without a conflict',async()=>{
+ const f=await checksumFixture();const state:any={'note.bin':{remoteId:'test',remoteRev:'old-revision',localMtime:0,localSize:0}};
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.deepEqual(result.errors,[]);assert.deepEqual(result.conflicts,[]);assert.equal(f.counts().downloads,0);assert.equal(state['note.bin'].remoteRev,remote.md5Checksum);}finally{f.restore();}
+});
+test('a remote revision change during hashing prevents recording state',async()=>{
+ for(const change of [{version:'2'},{sha256Checksum:'0'.repeat(64)},{size:'1'},{modifiedTime:'new'}]){
+  const f=await checksumFixture();const state:any={};(f.drive as any).getFile=async()=>({...f.r,...change});
+  try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.match(result.errors.join(),/Remote file changed/);assert.deepEqual(state,{});assert.equal(f.uploaded.length,0);}finally{f.restore();}
+ }
+});
+test('a local edit while reading or validating the remote checksum prevents recording state',async()=>{
+ for(const when of ['read','remote','record']){
+  const f=await checksumFixture();const state:any={};
+  if(when==='read'){
+   const fetch=globalThis.fetch;globalThis.fetch=async(...args:Parameters<typeof fetch>)=>{const r=await fetch(...args);await f.adapter.write('note.bin','edited');return r;};
+  }else (f.drive as any).getFile=async()=>{
+   if(when==='remote')await f.adapter.write('note.bin','edited');
+   else {const stat=f.adapter.stat.bind(f.adapter);let calls=0;f.adapter.stat=async(p)=>{if(p==='note.bin'&&++calls===2)await f.adapter.write(p,'edited');return stat(p);};}
+   return {...f.r};
+  };
+  try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.match(result.errors.join(),/Local file changed/);assert.deepEqual(state,{});assert.equal(f.uploaded.length,0);}finally{f.restore();}
+ }
+});
+test('Drive requests SHA metadata in listings and fresh file metadata',async()=>{
+ (globalThis as any).requestUrlMock=async(o:any)=>{assert.ok(new URL(o.url).searchParams.get('fields')!.includes('sha256Checksum'));return response(200,o.url.includes('/files?')?{files:[]}:{...remote,sha256Checksum:sha256Of(bytes)});};
+ const drive=new DriveClient(async()=> 'fake');await drive.listChildren('root');assert.equal((await drive.getFile('test')).sha256Checksum,sha256Of(bytes));
+});
+test('hashing progress has a separate label and byte percentage',()=>{
+ const progress=new SyncProgress();progress.transfer({phase:'hash',path:'a.pdf',bytes:chunkSize,total:2*chunkSize});assert.match(progress.text(),/Hashing/);assert.match(progress.text(),/50%/);
+});
+import { hashLocalFile } from '../src/checksum';
+test('hashing stays at 1 MiB regardless of the transport ceiling and handles stream boundaries',async()=>{
+ const {adapter}=makeFiles();await adapter.writeBinary('note.bin',bytes.buffer);const old=globalThis.fetch;const progress:number[]=[];
+ globalThis.fetch=async()=>new Response(new ReadableStream({start(c){c.enqueue(bytes.subarray(0,19));c.enqueue(bytes.subarray(19,chunkSize+43));c.enqueue(bytes.subarray(chunkSize+43));c.close();}}));
+ try{assert.equal(await hashLocalFile(adapter as any,'note.bin',n=>progress.push(n)),sha256Of(bytes));assert.deepEqual(progress,[0,chunkSize,2*chunkSize,bytes.length]);}finally{globalThis.fetch=old;}
+});
+test('hashing accepts uppercase SHA metadata',async()=>{
+ const f=await checksumFixture(bytes,sha256Of(bytes).toUpperCase());
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,{},hooks);assert.deepEqual(result.errors,[]);assert.equal(f.counts().downloads,0);}finally{f.restore();}
+});
+test('failed local streams or remote validation never mark a checksum comparison complete',async()=>{
+ for(const mode of ['truncated','unreadable','metadata-error']){
+  const f=await checksumFixture();const state:any={};
+  if(mode==='truncated')globalThis.fetch=async()=>new Response(bytes.subarray(0,100));
+  if(mode==='unreadable')globalThis.fetch=async()=>new Response(null,{status:404});
+  if(mode==='metadata-error')(f.drive as any).getFile=async()=>{throw new Error('offline');};
+  try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.equal(result.errors.length,1);assert.deepEqual(state,{});assert.equal(f.counts().downloads,0);assert.equal(f.uploaded.length,0);}finally{f.restore();}
+ }
+});
+test('matching checksums at different relative paths are not treated as the same file',async()=>{
+ const f=await checksumFixture();const tree=await f.drive.listTree();tree.files.delete('note.bin');tree.files.set('other.bin',{...f.r,name:'other.bin'});const state:any={};const phases:string[]=[];
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,{...hooks,transfer:p=>phases.push(p.phase)});assert.deepEqual(result.errors,[]);assert.equal(result.uploaded,1);assert.equal(result.downloaded,1);assert.equal(f.counts().metadata,0);assert.ok(!phases.includes('hash'));assert.deepEqual(Object.keys(state).sort(),['note.bin','other.bin']);}finally{f.restore();}
+});
+test('desktop/iOS keep the byte-comparison fallback without a SHA checksum',async()=>{
+ const f=await checksumFixture();delete f.r.sha256Checksum;Platform.isAndroidApp=false;
+ (f.vault as any).readBinary=async()=>bytes.slice().buffer;(f.drive as any).download=async()=>bytes.slice().buffer;const state:any={};
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,settings,state,hooks);assert.deepEqual(result.errors,[]);assert.ok(state['note.bin']);assert.equal(f.counts().reads,0);}finally{Platform.isAndroidApp=true;f.restore();}
+});
+test('desktop checksum mismatch still preserves both local and remote versions',async()=>{
+ const local=bytes.slice();local[0]^=255;const f=await checksumFixture(local,sha256Of(bytes));Platform.isAndroidApp=false;
+ const original=f.vault.getAbstractFileByPath();
+ (f.vault as any).getAbstractFileByPath=(path:string)=>path==='note.bin'?original:null;
+ (f.vault as any).readBinary=async()=>local.slice().buffer;
+ (f.vault as any).createBinary=async(path:string,data:ArrayBuffer)=>f.adapter.writeBinary(path,data);
+ (f.drive as any).download=async()=>bytes.slice().buffer;
+ (f.drive as any).createFile=async(name:string,parentId:string,data:ArrayBuffer)=>{f.uploaded.push({target:{name,parentId},bytes:Buffer.from(data)});return {...f.r,id:'conflict-id'};};
+ (f.drive as any).updateFile=async(id:string,data:ArrayBuffer)=>{f.uploaded.push({target:{id},bytes:Buffer.from(data)});return {...f.r};};
+ try{
+  const result=await runSync({vault:f.vault} as any,f.drive as any,settings,{},hooks);
+  assert.deepEqual(result.errors,[]);assert.deepEqual(result.conflicts,['note.bin']);
+  assert.deepEqual(f.uploaded.map(v=>v.bytes),[Buffer.from(bytes),Buffer.from(local)]);
+  assert.deepEqual(f.adapter.files.get('note.bin'),local);
+  const conflict=[...f.adapter.files.keys()].find(p=>p.includes('(conflict'))!;
+  assert.deepEqual(f.adapter.files.get(conflict),bytes);
+ }finally{Platform.isAndroidApp=true;f.restore();}
+});

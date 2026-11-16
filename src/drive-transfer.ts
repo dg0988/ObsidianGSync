@@ -1,8 +1,8 @@
 import type { RequestUrlResponse } from 'obsidian';
 import type { RemoteFile } from './drive';
+import { DRIVE_FILE_FIELDS as FIELDS, fileSize, sameRemoteVersion } from './remote-metadata';
 import { assertTransferChunkBytes, transferChunkBytes } from './transfer-settings';
 
-export const TRANSFER_CHUNK_SIZE = 1024 * 1024;
 export type ByteProgress = (bytes: number, total: number) => void;
 export type BinarySource = AsyncIterable<ArrayBuffer>;
 export type TransferRequest = (url: string, options?: {
@@ -10,24 +10,13 @@ export type TransferRequest = (url: string, options?: {
   headers?: Record<string, string>; retry?: boolean;
 }) => Promise<RequestUrlResponse>;
 const API = 'https://www.googleapis.com/drive/v3/files';
-const FIELDS = 'id,name,mimeType,md5Checksum,modifiedTime,size,version';
 export const header = (r: RequestUrlResponse, name: string): string | undefined =>
   Object.entries(r.headers).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1];
-export function fileSize(file: RemoteFile): number {
-  if (!/^\d+$/.test(file.size ?? '')) throw new Error('Missing remote file size');
-  const size = Number(file.size);
-  if (!Number.isSafeInteger(size)) throw new Error('Invalid remote file size');
-  return size;
-}
-function unchanged(a: RemoteFile, b: RemoteFile): boolean {
-  return a.id === b.id && a.size === b.size && a.modifiedTime === b.modifiedTime &&
-    a.md5Checksum === b.md5Checksum && a.version === b.version;
-}
 export async function* downloadChunks(req: TransferRequest, expected: RemoteFile, onProgress?: ByteProgress, chunkSize = transferChunkBytes(undefined)): AsyncGenerator<ArrayBuffer> {
   assertTransferChunkBytes(chunkSize);
   const url = `${API}/${encodeURIComponent(expected.id)}`;
   const current = async () => (await req(`${url}?fields=${FIELDS}`)).json as RemoteFile;
-  if (!unchanged(expected, await current())) throw new Error('Remote file changed before download; retry sync');
+  if (!sameRemoteVersion(expected, await current())) throw new Error('Remote file changed before download; retry sync');
   const size = fileSize(expected);
   onProgress?.(0, size);
   for (let start = 0; start < size; start += chunkSize) {
@@ -40,7 +29,7 @@ export async function* downloadChunks(req: TransferRequest, expected: RemoteFile
     yield r.arrayBuffer;
     onProgress?.(end + 1, size);
   }
-  if (!unchanged(expected, await current())) throw new Error('Remote file changed during download; retry sync');
+  if (!sameRemoteVersion(expected, await current())) throw new Error('Remote file changed during download; retry sync');
 }
 
 /** A session URL is a credential: never include it or response bodies in errors. */

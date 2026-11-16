@@ -1,17 +1,18 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
 
 import { downloadChunks, uploadChunks, BinarySource, ByteProgress } from "./drive-transfer";
+import { DRIVE_FILE_FIELDS as FIELDS } from "./remote-metadata";
 
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
-const FIELDS = "id,name,mimeType,md5Checksum,modifiedTime,size,version";
 
 export interface RemoteFile {
   id: string;
   name: string;
   mimeType: string;
   md5Checksum?: string;
+  sha256Checksum?: string;
   modifiedTime: string;
   size?: string;
   version?: string;
@@ -144,6 +145,10 @@ export class DriveClient {
 
   uploadChunks(size: number, chunks: BinarySource, target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress, chunkSize?: number): Promise<RemoteFile> {
     return uploadChunks((url, options) => this.req(url, options), size, chunks, target, onProgress, chunkSize);
+  }
+
+  async getFile(id: string): Promise<RemoteFile> {
+    return (await this.req(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`)).json as RemoteFile;
   }
 
   async download(id: string): Promise<ArrayBuffer> {

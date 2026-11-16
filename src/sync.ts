@@ -4,6 +4,9 @@ import { GSyncSettings } from "./settings";
 import type { TransferProgress } from "./progress";
 import { AndroidFiles } from "./android-files";
 import { transferChunkBytes } from "./transfer-settings";
+import { assertLocalUnchanged, sameStat, Snapshot } from "./local-files";
+import { hashLocalFile, validSha256 } from "./checksum";
+import { sameRemoteVersion } from "./remote-metadata";
 
 /** What both sides looked like the last time this path was in sync. */
 export interface SyncRecord {
@@ -99,8 +102,9 @@ export async function runSync(
   const remote = tree.files;
 
   // ---- helpers ------------------------------------------------------------
-  const record = async (path: string, r: RemoteFile) => {
+  const record = async (path: string, r: RemoteFile, expected?: Snapshot) => {
     const st = await vault.adapter.stat(path);
+    if (expected !== undefined && !sameStat(expected, st)) throw new Error("Local file changed before recording sync; retry sync");
     if (!st) return;
     state[path] = { remoteId: r.id, remoteRev: rev(r), localMtime: st.mtime, localSize: st.size };
   };
@@ -190,14 +194,30 @@ export async function runSync(
   const localChangedSince = (f: TFile, s: SyncRecord) => f.stat.mtime !== s.localMtime || f.stat.size !== s.localSize;
 
   const resolveBothChanged = async (path: string, l: TFile, r: RemoteFile) => {
+    const expected = await vault.adapter.stat(path);
+    if (!expected || expected.type !== "file") throw new Error("Local file missing during comparison");
+    // Only compare files already matched by their full vault-relative path.
+    // A missing/invalid checksum keeps the exact comparison fallback.
+    let equal: boolean | undefined;
+    const remoteSize = /^\d+$/.test(r.size ?? "") ? Number(r.size) : NaN;
+    if (Number.isSafeInteger(remoteSize) && expected.size !== remoteSize) equal = false;
+    else if (validSha256(r.sha256Checksum)) {
+      const digest = await hashLocalFile(vault.adapter, path,
+        bytes => hooks.transfer?.({ phase: "hash", path, bytes, total: expected.size }));
+      if (!sameRemoteVersion(r, await drive.getFile(r.id))) throw new Error("Remote file changed during comparison; retry sync");
+      await assertLocalUnchanged(vault.adapter, path, expected);
+      equal = digest === r.sha256Checksum.toLowerCase();
+      if (equal) { await record(path, r, expected); return; }
+    }
     if (android) {
-      const expected = await vault.adapter.stat(path);
       const staged = await android.stage(downloading(path, r));
       try {
-        hooks.transfer?.({ phase: "compare", path });
-        const equal = await android.equal(path, staged.path);
+        if (equal === undefined) {
+          hooks.transfer?.({ phase: "compare", path });
+          equal = await android.equal(path, staged.path);
+        }
         await android.assertUnchanged(path, expected);
-        if (equal) { await record(path, r); return; }
+        if (equal) { await record(path, r, expected); return; }
         let cPath = conflictPath(path);
         while (await vault.adapter.exists(cPath) || tree.files.has(cPath)) {
           const suffix = "-" + crypto.randomUUID();
@@ -215,10 +235,11 @@ export async function runSync(
         return;
       } finally { await staged.dispose(); }
     }
-    hooks.transfer?.({ phase: "compare", path });
+    hooks.transfer?.({ phase: equal === undefined ? "compare" : "download", path });
     const [ld, rd] = await Promise.all([vault.readBinary(l), drive.download(r.id)]);
-    if (sameBytes(ld, rd)) {
-      await record(path, r);
+    await assertLocalUnchanged(vault.adapter, path, expected);
+    if (equal === undefined && sameBytes(ld, rd)) {
+      await record(path, r, expected);
       return;
     }
     // Keep both: local wins the original name, Drive's version is saved beside it.

@@ -1,5 +1,5 @@
 export interface TransferProgress {
-  phase: 'download' | 'upload' | 'compare' | 'install';
+  phase: 'download' | 'upload' | 'compare' | 'install' | 'hash';
   path: string;
   bytes?: number;
   total?: number;
@@ -28,9 +28,9 @@ export class SyncProgress {
     const lines = [this.total ? `GSync: ${this.done}/${this.total} files checked` : 'GSync: preparing sync…'];
     const p = this.current;
     if (!p) return lines[0];
-    const label = { download: '↓ Downloading', upload: '↑ Uploading', compare: 'Comparing', install: 'Saving' }[p.phase];
+    const label = { download: '↓ Downloading', upload: '↑ Uploading', compare: 'Comparing', install: 'Saving', hash: 'Hashing' }[p.phase];
     lines.push(`${label}: ${p.path}`);
-    if ((p.phase === 'download' || p.phase === 'upload') && p.bytes !== undefined && p.total !== undefined && Number.isFinite(p.bytes) && Number.isFinite(p.total) && p.total >= 0) {
+    if ((p.phase === 'download' || p.phase === 'upload' || p.phase === 'hash') && p.bytes !== undefined && p.total !== undefined && Number.isFinite(p.bytes) && Number.isFinite(p.total) && p.total >= 0) {
       const percent = p.total ? Math.min(100, Math.floor(p.bytes * 100 / p.total)) : 100;
       let detail = `${mib(p.bytes)} / ${mib(p.total)} MiB · ${percent}%`;
       const seconds = (this.now() - this.started) / 1000;
