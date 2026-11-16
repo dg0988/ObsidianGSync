@@ -2,6 +2,7 @@ import { SyncProgress } from "./progress";
 import { Notice, ObsidianProtocolData, Platform, Plugin } from "obsidian";
 import { exchangeCode, isPendingValid, PendingAuth, prepareSignIn, PreparedSignIn, PROTOCOL_ACTION, refreshAccessToken } from "./auth";
 import { DriveClient } from "./drive";
+import { normalizeTransferChunkSizeMiB } from "./transfer-settings";
 import { DEFAULT_SETTINGS, GSyncSettings, GSyncSettingTab } from "./settings";
 import { runSync, SyncState } from "./sync";
 
@@ -33,6 +34,7 @@ export default class GSyncPlugin extends Plugin {
   async onload() {
     const data = ((await this.loadData()) ?? {}) as PluginData;
     this.settings = { ...DEFAULT_SETTINGS, ...(data.settings ?? {}) };
+    this.settings.transferChunkSizeMiB = normalizeTransferChunkSizeMiB(this.settings.transferChunkSizeMiB);
     this.state = data.state ?? {};
     this.interruptedLastTime = !!data.syncInProgress;
     this.pendingAuth = data.pendingAuth ?? null;

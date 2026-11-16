@@ -3,6 +3,7 @@ import { DriveClient, RemoteFile, RemoteTree } from "./drive";
 import { GSyncSettings } from "./settings";
 import type { TransferProgress } from "./progress";
 import { AndroidFiles } from "./android-files";
+import { transferChunkBytes } from "./transfer-settings";
 
 /** What both sides looked like the last time this path was in sync. */
 export interface SyncRecord {
@@ -146,7 +147,7 @@ export async function runSync(
 
   const downloading = (path: string, remote: RemoteFile) => {
     hooks.transfer?.({ phase: "download", path, bytes: 0, total: Number(remote.size) });
-    return drive.downloadChunks(remote, (bytes, total) => hooks.transfer?.({ phase: "download", path, bytes, total }));
+    return drive.downloadChunks(remote, (bytes, total) => hooks.transfer?.({ phase: "download", path, bytes, total }), transferChunkBytes(settings.transferChunkSizeMiB));
   };
 
   const downloadLocal = async (path: string, remote: RemoteFile) => {
@@ -179,8 +180,9 @@ export async function runSync(
       name: path.split("/").pop() as string, parentId: await ensureRemoteParent(path),
     };
     await android.assertUnchanged(path, expected);
-    const uploaded = await drive.uploadChunks(expected.size, android.readChunks(path), target,
-      (bytes, total) => hooks.transfer?.({ phase: "upload", path, bytes, total }));
+    const chunkSize = transferChunkBytes(settings.transferChunkSizeMiB);
+    const uploaded = await drive.uploadChunks(expected.size, android.readChunks(path, chunkSize), target,
+      (bytes, total) => hooks.transfer?.({ phase: "upload", path, bytes, total }), chunkSize);
     await android.assertUnchanged(path, expected);
     return uploaded;
   };

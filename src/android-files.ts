@@ -1,5 +1,6 @@
 import type { DataAdapter, Stat } from 'obsidian';
 import { BinarySource, TRANSFER_CHUNK_SIZE } from './drive-transfer';
+import { assertTransferChunkBytes, MAX_TRANSFER_CHUNK_BYTES } from './transfer-settings';
 
 export type Snapshot = Pick<Stat, 'size' | 'mtime' | 'type'> | null;
 function sameStat(a: Snapshot, b: Snapshot): boolean {
@@ -37,7 +38,8 @@ export class AndroidFiles {
     if ((await this.adapter.stat(target))?.size !== before.size) throw new Error('Incomplete native file copy');
     await this.assertUnchanged(source, before);
   }
-  async *readChunks(path: string): AsyncGenerator<ArrayBuffer> {
+  async *readChunks(path: string, chunkSize = TRANSFER_CHUNK_SIZE): AsyncGenerator<ArrayBuffer> {
+    assertTransferChunkBytes(chunkSize);
     const before = await this.adapter.stat(path);
     if (!before || before.type !== 'file') throw new Error('Local file is missing');
     // Obsidian's Android adapter uses this resource URL for large binary reads too.
@@ -45,7 +47,7 @@ export class AndroidFiles {
     const response = await fetch(this.adapter.getResourcePath(path), { cache: 'no-store' });
     if (!response.ok || !response.body) throw new Error('Cannot stream local file');
     const reader = response.body.getReader();
-    let buffer = new Uint8Array(TRANSFER_CHUNK_SIZE);
+    let buffer = new Uint8Array(chunkSize);
     let used = 0;
     let total = 0;
     try {
@@ -58,7 +60,7 @@ export class AndroidFiles {
         while (offset < value.byteLength) {
           if (used === buffer.length) {
             yield buffer.buffer;
-            buffer = new Uint8Array(TRANSFER_CHUNK_SIZE);
+            buffer = new Uint8Array(chunkSize);
             used = 0;
           }
           const count = Math.min(buffer.length - used, value.byteLength - offset);
@@ -70,7 +72,7 @@ export class AndroidFiles {
       if (total !== before.size) throw new Error('Incomplete local file stream');
       await this.assertUnchanged(path, before);
       // Hold the final block until size and modification checks have passed.
-      if (used) yield buffer.slice(0, used).buffer;
+      if (used) yield used === buffer.length ? buffer.buffer : buffer.slice(0, used).buffer;
     } finally {
       await reader.cancel().catch(() => undefined);
       reader.releaseLock();
@@ -101,7 +103,7 @@ export class AndroidFiles {
       let size = 0;
       await this.adapter.writeBinary(path, new ArrayBuffer(0));
       for await (const chunk of chunks) {
-        if (chunk.byteLength > TRANSFER_CHUNK_SIZE) throw new Error('Oversized download chunk');
+        if (chunk.byteLength > MAX_TRANSFER_CHUNK_BYTES) throw new Error('Oversized download chunk');
         await this.adapter.appendBinary(path, chunk);
         size += chunk.byteLength;
       }

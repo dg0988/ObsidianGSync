@@ -138,12 +138,12 @@ export class DriveClient {
     return { files, folders, warnings };
   }
 
-  downloadChunks(file: RemoteFile, onProgress?: ByteProgress): AsyncGenerator<ArrayBuffer> {
-    return downloadChunks((url, options) => this.req(url, options), file, onProgress);
+  downloadChunks(file: RemoteFile, onProgress?: ByteProgress, chunkSize?: number): AsyncGenerator<ArrayBuffer> {
+    return downloadChunks((url, options) => this.req(url, options), file, onProgress, chunkSize);
   }
 
-  uploadChunks(size: number, chunks: BinarySource, target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress): Promise<RemoteFile> {
-    return uploadChunks((url, options) => this.req(url, options), size, chunks, target, onProgress);
+  uploadChunks(size: number, chunks: BinarySource, target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress, chunkSize?: number): Promise<RemoteFile> {
+    return uploadChunks((url, options) => this.req(url, options), size, chunks, target, onProgress, chunkSize);
   }
 
   async download(id: string): Promise<ArrayBuffer> {

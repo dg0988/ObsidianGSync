@@ -22,13 +22,13 @@ test('Android download bounds every media response and preserves bytes', async (
  const ranges=downloadMock(); const drive=new DriveClient(async()=> 'fake-token');
  // The baseline full download must fail at the HTTP boundary.
  const output: Uint8Array[]=[];
- if ('downloadChunks' in drive) for await (const b of (drive as any).downloadChunks(remote)) output.push(new Uint8Array(b));
+ if ('downloadChunks' in drive) for await (const b of (drive as any).downloadChunks(remote, undefined, chunkSize)) output.push(new Uint8Array(b));
  else output.push(new Uint8Array(await drive.download(remote.id)));
  assert.deepEqual(Buffer.concat(output),Buffer.from(bytes)); assert.equal(ranges.length,3);
 });
 test('a server ignoring Range is rejected',async()=>{
  downloadMock(true); const drive=new DriveClient(async()=> 'fake-token');
- await assert.rejects(async()=>{for await(const _ of (drive as any).downloadChunks(remote)) {}}, /range/i);
+ await assert.rejects(async()=>{for await(const _ of (drive as any).downloadChunks(remote, undefined, chunkSize)) {}}, /range/i);
 });
 
 test('resumable upload recovers a lost acknowledgement without duplicating bytes', async()=>{
@@ -120,7 +120,7 @@ test('incomplete or mismatched ranges fail instead of saving corrupted data',asy
    }else if(++metadata>1 && mode==='changed-version')r.json={...remote,version:'2'};
    return r;
   };
-  await assert.rejects(async()=>{for await(const _ of new DriveClient(async()=> 'fake').downloadChunks(remote)){}},/range|changed/i);
+  await assert.rejects(async()=>{for await(const _ of new DriveClient(async()=> 'fake').downloadChunks(remote, undefined, chunkSize)){}},/range|changed/i);
  }
 });
 
@@ -238,7 +238,7 @@ test('progress resets speed for a new file and labels local processing',()=>{
 });
 test('download progress counts bytes consumed by the caller',async()=>{
  downloadMock();const progress:number[]=[];const drive=new DriveClient(async()=> 'fake');
- for await(const _ of drive.downloadChunks(remote,(n)=>progress.push(n))){}
+ for await(const _ of drive.downloadChunks(remote,(n)=>progress.push(n),chunkSize)){}
  assert.deepEqual(progress,[0,chunkSize,2*chunkSize,bytes.length]);
 });
 test('upload progress counts acknowledgements instead of retransmitted bytes',async()=>{
@@ -254,4 +254,82 @@ test('upload progress counts acknowledgements instead of retransmitted bytes',as
 });
 test('file progress clears the previous transfer and missing size never displays NaN',()=>{
  const p=new SyncProgress();p.files(1,10);p.transfer({phase:'download',path:'a',bytes:0,total:NaN});assert.doesNotMatch(p.text(),/NaN/);p.files(2,10);assert.doesNotMatch(p.text(),/Downloading/);assert.match(p.text(),/2\/10/);
+});
+
+// Configurable transport blocks are independent from local comparison blocks.
+import { normalizeTransferChunkSizeMiB, transferChunkBytes } from '../src/transfer-settings';
+test('transfer settings accept only the supported sizes and default to 8 MiB', () => {
+ for (const n of [1,2,4,8,16]) assert.equal(transferChunkBytes(n),n*chunkSize);
+ for (const n of [undefined,null,0,-1,3,32,NaN,Infinity,'4']) {
+  assert.equal(normalizeTransferChunkSizeMiB(n),8);assert.equal(transferChunkBytes(n),8*chunkSize);
+ }
+});
+for (const mib of [1,2,4,8,16]) test(`download/upload/read/stage honor ${mib} MiB and final remainders`,async()=>{
+ const limit=mib*chunkSize;
+ for (const size of [0,17,limit,limit+7]) {
+  const data=new Uint8Array(size);for(let i=0;i<size;i++)data[i]=i%251;
+  const r={...remote,size:String(size)};let downloaded=0;let uploaded=0;
+  (globalThis as any).requestUrlMock=async(o:any)=>{
+   if(o.url.includes('uploadType='))return response(200,{},undefined,{location:'https://www.googleapis.com/upload/test'});
+   if(o.method==='PUT'){
+    if(size===0){assert.equal(o.headers['Content-Range'],'bytes */0');return response(200,r);}
+    const end=Math.min(size,uploaded+limit);
+    assert.equal(o.headers['Content-Range'],`bytes ${uploaded}-${end-1}/${size}`);
+    assert.deepEqual(new Uint8Array(o.body),data.subarray(uploaded,end));uploaded=end;
+    return uploaded===size?response(200,r):response(308,{},undefined,{range:`bytes=0-${uploaded-1}`});
+   }
+   if(!o.url.includes('alt=media'))return response(200,r);
+   const end=Math.min(size,downloaded+limit);
+   assert.equal(o.headers.Range,`bytes=${downloaded}-${end-1}`);
+   const result=response(206,{},data.slice(downloaded,end).buffer,{'content-range':`bytes ${downloaded}-${end-1}/${size}`});downloaded=end;return result;
+  };
+  const drive=new DriveClient(async()=> 'fake');const {adapter,files}=makeFiles();
+  const staged=await files.stage(drive.downloadChunks(r,undefined,limit));
+  assert.deepEqual(Buffer.from(adapter.files.get(staged.path)!),Buffer.from(data));assert.equal(downloaded,size);
+  assert.equal(adapter.maxAppend,Math.min(limit,size));
+  const old=globalThis.fetch;globalThis.fetch=async()=>new Response(data);
+  try{await drive.uploadChunks(size,files.readChunks(staged.path,limit),{id:r.id},undefined,limit);}finally{globalThis.fetch=old;}
+  assert.equal(uploaded,size);await staged.dispose();
+ }
+});
+test('large upload reuses original buffer then resends only the unacknowledged suffix',async()=>{
+ const data=new Uint8Array(8*chunkSize);data.fill(123);let call=0;const progress:number[]=[];
+ (globalThis as any).requestUrlMock=async(o:any)=>{
+  if(o.url.includes('uploadType='))return response(200,{},undefined,{location:'https://www.googleapis.com/upload/test'});
+  call++;
+  if(call===1){assert.equal(o.body,data.buffer);throw new Error('lost response');}
+  if(call===2){assert.equal(o.headers['Content-Range'],`bytes */${data.length}`);return response(308,{},undefined,{range:`bytes=0-${2*chunkSize-1}`});}
+  assert.equal(o.headers['Content-Range'],`bytes ${2*chunkSize}-${data.length-1}/${data.length}`);
+  assert.deepEqual(new Uint8Array(o.body),data.subarray(2*chunkSize));return response(200,{...remote,size:String(data.length)});
+ };
+ async function* input(){yield data.buffer;}
+ await new DriveClient(async()=> 'fake').uploadChunks(data.length,input(),{id:'test'},n=>progress.push(n));
+ assert.equal(call,3);assert.deepEqual(progress,[0,2*chunkSize,data.length]);
+});
+test('staging rejects chunks above the absolute 16 MiB ceiling',async()=>{
+ const {files}=makeFiles();async function* input(){yield new ArrayBuffer(16*chunkSize+1);}
+ await assert.rejects(()=>files.stage(input()),/Oversized/);
+});
+test('sync snapshots the selected upload size while settings change mid-transfer',async()=>{
+ const f=await syncFixture(bytes);const selected={...settings,transferChunkSizeMiB:2};const state:any={'note.bin':{remoteId:'test',remoteRev:remote.md5Checksum,localMtime:0,localSize:0}};
+ const sizes:number[]=[];
+ (f.drive as any).uploadChunks=async(size:number,chunks:any,target:any,progress:any,limit:number)=>{
+  assert.equal(limit,2*chunkSize);selected.transferChunkSizeMiB=16;
+  for await(const block of chunks)sizes.push(block.byteLength);
+  return {...remote,size:String(size)};
+ };
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,selected,state,hooks);assert.deepEqual(result.errors,[]);assert.deepEqual(sizes,[2*chunkSize,7]);}finally{f.restore();}
+});
+test('sync passes the selected download limit to Drive',async()=>{
+ const f=await syncFixture();let limit=0;const original=f.drive.downloadChunks;
+ (f.drive as any).downloadChunks=(r:any,p:any,n:number)=>{limit=n;return original();};
+ try{const result=await runSync({vault:f.vault} as any,f.drive as any,{...settings,transferChunkSizeMiB:4},{},hooks);assert.deepEqual(result.errors,[]);assert.equal(limit,4*chunkSize);}finally{f.restore();}
+});
+test('unsupported byte limits are rejected before opening requests or local streams',async()=>{
+ const drive=new DriveClient(async()=>{throw new Error('should not request');});const {files}=makeFiles();
+ for(const limit of [0,3*chunkSize,32*chunkSize]){
+  await assert.rejects(async()=>{for await(const _ of drive.downloadChunks(remote,undefined,limit)){}},/Unsupported/);
+  await assert.rejects(()=>drive.uploadChunks(0,sourceOf(new Uint8Array()),{id:'test'},undefined,limit),/Unsupported/);
+  await assert.rejects(async()=>{for await(const _ of files.readChunks('missing',limit)){}},/Unsupported/);
+ }
 });

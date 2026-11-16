@@ -1,5 +1,6 @@
 import type { RequestUrlResponse } from 'obsidian';
 import type { RemoteFile } from './drive';
+import { assertTransferChunkBytes, transferChunkBytes } from './transfer-settings';
 
 export const TRANSFER_CHUNK_SIZE = 1024 * 1024;
 export type ByteProgress = (bytes: number, total: number) => void;
@@ -22,14 +23,15 @@ function unchanged(a: RemoteFile, b: RemoteFile): boolean {
   return a.id === b.id && a.size === b.size && a.modifiedTime === b.modifiedTime &&
     a.md5Checksum === b.md5Checksum && a.version === b.version;
 }
-export async function* downloadChunks(req: TransferRequest, expected: RemoteFile, onProgress?: ByteProgress): AsyncGenerator<ArrayBuffer> {
+export async function* downloadChunks(req: TransferRequest, expected: RemoteFile, onProgress?: ByteProgress, chunkSize = transferChunkBytes(undefined)): AsyncGenerator<ArrayBuffer> {
+  assertTransferChunkBytes(chunkSize);
   const url = `${API}/${encodeURIComponent(expected.id)}`;
   const current = async () => (await req(`${url}?fields=${FIELDS}`)).json as RemoteFile;
   if (!unchanged(expected, await current())) throw new Error('Remote file changed before download; retry sync');
   const size = fileSize(expected);
   onProgress?.(0, size);
-  for (let start = 0; start < size; start += TRANSFER_CHUNK_SIZE) {
-    const end = Math.min(size - 1, start + TRANSFER_CHUNK_SIZE - 1);
+  for (let start = 0; start < size; start += chunkSize) {
+    const end = Math.min(size - 1, start + chunkSize - 1);
     const r = await req(`${url}?alt=media`, { headers: { Range: `bytes=${start}-${end}`, 'Accept-Encoding': 'identity' } });
     if (r.status !== 206 || header(r, 'Content-Range') !== `bytes ${start}-${end}/${size}`) {
       throw new Error('Drive did not honor the requested byte range');
@@ -43,7 +45,8 @@ export async function* downloadChunks(req: TransferRequest, expected: RemoteFile
 
 /** A session URL is a credential: never include it or response bodies in errors. */
 export async function uploadChunks(req: TransferRequest, size: number, chunks: BinarySource,
-  target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress): Promise<RemoteFile> {
+  target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress, chunkSize = transferChunkBytes(undefined)): Promise<RemoteFile> {
+  assertTransferChunkBytes(chunkSize);
   if (!Number.isSafeInteger(size) || size < 0) throw new Error('Invalid upload size');
   onProgress?.(0, size);
   const updating = 'id' in target;
@@ -69,7 +72,7 @@ export async function uploadChunks(req: TransferRequest, size: number, chunks: B
       try {
         r = await req(location, { method: 'PUT', contentType: 'application/octet-stream',
           headers: { 'Content-Range': size === 0 ? 'bytes */0' : `bytes ${acknowledged}-${end - 1}/${size}` },
-          body: data.slice(acknowledged - offset), retry: false });
+          body: acknowledged === offset ? data : data.slice(acknowledged - offset), retry: false });
       } catch {
         if (++failures > 4) throw new Error('Upload interrupted; retry sync');
         // A failed response does not mean the server rejected the bytes.
@@ -95,7 +98,7 @@ export async function uploadChunks(req: TransferRequest, size: number, chunks: B
     offset = end;
   };
   for await (const chunk of chunks) {
-    if (!chunk.byteLength || chunk.byteLength > TRANSFER_CHUNK_SIZE || offset + chunk.byteLength > size ||
+    if (!chunk.byteLength || chunk.byteLength > chunkSize || offset + chunk.byteLength > size ||
       (offset + chunk.byteLength < size && chunk.byteLength % (256 * 1024) !== 0)) throw new Error('Invalid upload chunk');
     await send(chunk);
   }
