@@ -29,8 +29,17 @@ lost responses and partial acknowledgements; invalid sizes; settings changes
 during upload; and passing the selected download limit through the sync engine.
 Run `npm test`, `npm run build` and `npm run lint`.
 
-The new default and larger options have not yet been tested on a device.
-Existing successful Android runs used 1 MiB. The cap bounds each request, not
-the total memory footprint of the native bridge/WebView. Device validation
-should include downloads, uploads, repeated sync and memory monitoring before
-claiming performance or stability improvements.
+On 2026-11-16, the owner reported a successful download of a 53,721,931-byte
+PDF (51.23 MiB) on a Samsung Galaxy S25 FE running Obsidian 1.15.1, with the
+transfer setting at 16 MiB. Post-download ADB verification confirmed that the
+phone file's SHA-256 matched both the desktop original and Drive metadata,
+and that GSync recorded the expected local size. The tested code was commit
+`407f32f`, still displaying version 1.0.6 at that time.
+
+The owner selected 16 MiB directly: 8 MiB was not device-tested. No memory or
+throughput capture was running for this download. A later observation found
+another sync active, so this validates the individual file's successful
+transfer and integrity rather than completion of every subsequent sync.
+Android uploads at larger sizes and native desktop/iOS resource streaming
+still need device validation. The cap bounds each request, not the total
+memory footprint of the native bridge/WebView.
