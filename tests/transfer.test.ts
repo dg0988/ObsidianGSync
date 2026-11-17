@@ -258,10 +258,10 @@ test('file progress clears the previous transfer and missing size never displays
 
 // Configurable transport blocks are independent from local comparison blocks.
 import { normalizeTransferChunkSizeMiB, transferChunkBytes } from '../src/transfer-settings';
-test('transfer settings accept only the supported sizes and default to 8 MiB', () => {
+test('transfer settings accept only the supported sizes and default to 16 MiB', () => {
  for (const n of [1,2,4,8,16]) assert.equal(transferChunkBytes(n),n*chunkSize);
  for (const n of [undefined,null,0,-1,3,32,NaN,Infinity,'4']) {
-  assert.equal(normalizeTransferChunkSizeMiB(n),8);assert.equal(transferChunkBytes(n),8*chunkSize);
+  assert.equal(normalizeTransferChunkSizeMiB(n),16);assert.equal(transferChunkBytes(n),16*chunkSize);
  }
 });
 for (const mib of [1,2,4,8,16]) test(`download/upload/read/stage honor ${mib} MiB and final remainders`,async()=>{

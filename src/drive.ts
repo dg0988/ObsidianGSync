@@ -35,13 +35,47 @@ function q(s: string): string {
 
 const sleep = (ms: number) => new Promise((r) => window.setTimeout(r, ms));
 
+/** Folder name that marks a path as living in a Shared Drive: "Shared drives/<drive>/<path>". */
+export const SHARED_DRIVES = "shared drives";
+
+export function isSharedDrivePath(path: string): boolean {
+  const first = path.split(/[/\\]/).map((s) => s.trim()).filter(Boolean)[0];
+  return first?.toLowerCase() === SHARED_DRIVES;
+}
+
+/**
+ * Every Drive "files" and "permissions" call must say it supports Shared Drives, or items in
+ * Shared Drives are invisible (404). Resumable upload session URLs are left untouched.
+ */
+export function withAllDrives(url: string): string {
+  if (!/googleapis\.com\/(upload\/)?drive\/v3\/files/.test(url) || url.includes("upload_id=") || url.includes("supportsAllDrives=")) return url;
+  return url + (url.includes("?") ? "&" : "?") + "supportsAllDrives=true";
+}
+
+export interface FolderAccess {
+  canEdit: boolean;
+  inSharedDrive: boolean;
+  canShare: boolean;
+}
+
 export class DriveClient {
+  /** Folder id -> Shared Drive id, for listing Shared Drive folders. */
+  private driveOf = new Map<string, string>();
+  /** Resolved folder paths, valid for one sync. */
+  private pathCache = new Map<string, string>();
+
   constructor(private getToken: () => Promise<string>) {}
+
+  /** Forget resolved folder paths (call at the start of each sync). */
+  resetCache(): void {
+    this.pathCache.clear();
+  }
 
   private async req(
     url: string,
     opts: { method?: string; body?: string | ArrayBuffer; contentType?: string; headers?: Record<string, string>; retry?: boolean } = {}
   ): Promise<RequestUrlResponse> {
+    url = withAllDrives(url);
     for (let attempt = 0; ; attempt++) {
       const token = await this.getToken();
       const r = await requestUrl({
@@ -69,16 +103,23 @@ export class DriveClient {
     }
   }
 
+  private listParams(query: string, fields: string, parentId: string): URLSearchParams {
+    const params = new URLSearchParams({ q: query, fields, pageSize: "1000", includeItemsFromAllDrives: "true" });
+    const driveId = this.driveOf.get(parentId);
+    if (driveId) {
+      params.set("corpora", "drive");
+      params.set("driveId", driveId);
+    } else {
+      params.set("spaces", "drive");
+    }
+    return params;
+  }
+
   async listChildren(folderId: string): Promise<RemoteFile[]> {
     const out: RemoteFile[] = [];
     let pageToken = "";
     do {
-      const params = new URLSearchParams({
-        q: `'${q(folderId)}' in parents and trashed = false`,
-        fields: `nextPageToken, files(${FIELDS})`,
-        pageSize: "1000",
-        spaces: "drive",
-      });
+      const params = this.listParams(`'${q(folderId)}' in parents and trashed = false`, `nextPageToken, files(${FIELDS})`, folderId);
       if (pageToken) params.set("pageToken", pageToken);
       const r = await this.req(`${API}/files?${params.toString()}`);
       const body = r.json as FileList;
@@ -94,23 +135,77 @@ export class DriveClient {
       contentType: "application/json",
       body: JSON.stringify({ name, mimeType: FOLDER_MIME, parents: [parentId] }),
     });
-    return (r.json as RemoteFile).id;
+    const id = (r.json as RemoteFile).id;
+    const driveId = this.driveOf.get(parentId);
+    if (driveId) this.driveOf.set(id, driveId);
+    return id;
   }
 
-  /** Resolve a path like "Obsidian/My Vault" under My Drive, creating missing folders. */
-  async ensureFolderPath(path: string): Promise<string> {
-    let parent = "root";
-    for (const name of path.split(/[/\\]/).map((s) => s.trim()).filter(Boolean)) {
-      const params = new URLSearchParams({
-        q: `'${q(parent)}' in parents and name = '${q(name)}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
-        fields: "files(id)",
-        spaces: "drive",
-      });
-      const r = await this.req(`${API}/files?${params.toString()}`);
-      const found = (r.json as FileList).files;
-      parent = found.length ? found[0].id : await this.createFolder(name, parent);
+  /** Find (or create) a direct child folder by name. */
+  async ensureChildFolder(parentId: string, name: string): Promise<string> {
+    const params = this.listParams(
+      `'${q(parentId)}' in parents and name = '${q(name)}' and mimeType = '${FOLDER_MIME}' and trashed = false`,
+      "files(id)",
+      parentId
+    );
+    const r = await this.req(`${API}/files?${params.toString()}`);
+    const found = (r.json as FileList).files;
+    if (found.length) {
+      const driveId = this.driveOf.get(parentId);
+      if (driveId) this.driveOf.set(found[0].id, driveId);
+      return found[0].id;
     }
+    return this.createFolder(name, parentId);
+  }
+
+  /**
+   * Set by the GSync Teams add-on: turns a Shared Drive's name into its id.
+   * Without it, folders under "Shared drives/" can't be synced.
+   */
+  sharedDriveResolver: ((name: string) => Promise<string>) | null = null;
+
+  /** Note that a folder belongs to a Shared Drive, so listings ask that drive. */
+  registerSharedDrive(folderId: string, driveId: string): void {
+    this.driveOf.set(folderId, driveId);
+  }
+
+  /** Authorized Google Drive API request, with GSync's retries. For add-ons. */
+  request(
+    url: string,
+    opts: { method?: string; body?: string | ArrayBuffer; contentType?: string; headers?: Record<string, string>; retry?: boolean } = {}
+  ): Promise<RequestUrlResponse> {
+    return this.req(url, opts);
+  }
+
+  /**
+   * Resolve a folder path, creating missing folders. "Obsidian/My Vault" is under My Drive;
+   * "Shared drives/Company/Notes" is inside the Shared Drive named "Company".
+   */
+  async ensureFolderPath(path: string): Promise<string> {
+    const segments = path.split(/[/\\]/).map((s) => s.trim()).filter(Boolean);
+    const key = segments.join("/");
+    const cached = this.pathCache.get(key);
+    if (cached) return cached;
+    let parent = "root";
+    let rest = segments;
+    if (segments[0]?.toLowerCase() === SHARED_DRIVES) {
+      if (!segments[1]) throw new Error('Add the Shared Drive\'s name after "Shared drives/".');
+      if (!this.sharedDriveResolver) throw new Error("Folders in Shared Drives need the GSync Teams add-on.");
+      parent = await this.sharedDriveResolver(segments[1]);
+      this.driveOf.set(parent, parent);
+      rest = segments.slice(2);
+    }
+    for (const name of rest) parent = await this.ensureChildFolder(parent, name);
+    this.pathCache.set(key, parent);
     return parent;
+  }
+
+  /** What the signed-in user may do in a folder. */
+  async folderAccess(folderId: string): Promise<FolderAccess> {
+    const r = await this.req(`${API}/files/${encodeURIComponent(folderId)}?fields=driveId,capabilities(canAddChildren,canEdit,canShare)`);
+    const f = r.json as { driveId?: string; capabilities?: { canAddChildren?: boolean; canEdit?: boolean; canShare?: boolean } };
+    const c = f.capabilities ?? {};
+    return { canEdit: c.canAddChildren !== false && c.canEdit !== false, inSharedDrive: !!f.driveId, canShare: !!c.canShare };
   }
 
   async listTree(rootId: string): Promise<RemoteTree> {
@@ -121,8 +216,13 @@ export class DriveClient {
     while (queue.length) {
       const [prefix, id] = queue.shift() as [string, string];
       for (const f of await this.listChildren(id)) {
+        // Hidden files and folders (.obsidian, .git, .trash ...) are never part of note sync,
+        // so don't spend requests walking them. Settings sync lists the config folder itself.
+        if (f.name.startsWith(".")) continue;
         const path = prefix ? `${prefix}/${f.name}` : f.name;
         if (f.mimeType === FOLDER_MIME) {
+          const driveId = this.driveOf.get(id);
+          if (driveId) this.driveOf.set(f.id, driveId);
           if (!folders.has(path)) {
             folders.set(path, f.id);
             queue.push([path, f.id]);

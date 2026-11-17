@@ -1,14 +1,21 @@
 import { SyncProgress } from "./progress";
 import { Notice, ObsidianProtocolData, Platform, Plugin } from "obsidian";
 import { exchangeCode, isPendingValid, PendingAuth, prepareSignIn, PreparedSignIn, PROTOCOL_ACTION, refreshAccessToken } from "./auth";
-import { DriveClient } from "./drive";
+import { DriveClient, FolderAccess, isSharedDrivePath } from "./drive";
 import { normalizeTransferChunkSizeMiB } from "./transfer-settings";
-import { DEFAULT_SETTINGS, GSyncSettings, GSyncSettingTab } from "./settings";
-import { runSync, SyncState } from "./sync";
+import { cleanPath, DEFAULT_SETTINGS, GSyncSettings, GSyncSettingTab } from "./settings";
+import { runSync, SyncResult, SyncScope, SyncState, underPrefix } from "./sync";
+import { DEFAULT_CONFIG_SYNC, runConfigSync } from "./config-sync";
+import { GSYNC_API_VERSION, GSyncApi, GSyncFolder, TeamsExtension } from "./api";
 
 interface PluginData {
   settings?: Partial<GSyncSettings>;
+  /** Sync history for the whole-vault folder. */
   state?: SyncState;
+  /** Sync history for each extra folder pair, by pair id. */
+  pairStates?: Record<string, SyncState>;
+  /** Sync history for settings sync. */
+  configState?: SyncState;
   syncInProgress?: boolean;
   pendingAuth?: PendingAuth | null;
 }
@@ -16,6 +23,12 @@ interface PluginData {
 export default class GSyncPlugin extends Plugin {
   settings: GSyncSettings = { ...DEFAULT_SETTINGS };
   state: SyncState = {};
+  pairStates: Record<string, SyncState> = {};
+  configState: SyncState = {};
+  /** This device's access to each folder pair ("main" = whole vault), from the last sync. */
+  access = new Map<string, FolderAccess>();
+  /** The GSync Teams add-on, when it's installed, enabled and licensed. */
+  teams: TeamsExtension | null = null;
   private accessToken = "";
   private expiresAt = 0;
   private syncing = false;
@@ -31,9 +44,42 @@ export default class GSyncPlugin extends Plugin {
   private settingTab!: GSyncSettingTab;
   private drive = new DriveClient(() => this.getAccessToken());
 
+  get driveClient(): DriveClient {
+    return this.drive;
+  }
+
+  isTeams(): boolean {
+    return this.teams !== null;
+  }
+
+  /** Interface for add-ons such as GSync Teams (see src/api.ts). */
+  readonly api: GSyncApi = {
+    version: GSYNC_API_VERSION,
+    request: (url, opts) => this.drive.request(url, opts),
+    ensureFolderPath: (path) => this.drive.ensureFolderPath(path),
+    folderAccess: (folderId) => this.drive.folderAccess(folderId),
+    folders: (): GSyncFolder[] => [
+      { id: "main", local: "", remote: this.settings.remoteFolder },
+      ...this.settings.pairs.filter((p) => p.local && p.remote).map((p) => ({ id: p.id, local: p.local, remote: p.remote })),
+    ],
+    registerTeams: (ext) => {
+      this.teams = ext;
+      this.drive.sharedDriveResolver = (name) => ext.resolveSharedDrive(name);
+      return () => {
+        if (this.teams !== ext) return;
+        this.teams = null;
+        this.drive.sharedDriveResolver = null;
+      };
+    },
+  };
+
   async onload() {
     const data = ((await this.loadData()) ?? {}) as PluginData;
     this.settings = { ...DEFAULT_SETTINGS, ...(data.settings ?? {}) };
+    this.settings.configSync = { ...DEFAULT_CONFIG_SYNC, ...(data.settings?.configSync ?? {}) };
+    this.settings.pairs = (this.settings.pairs ?? []).map((p) => ({ ...p }));
+    this.pairStates = data.pairStates ?? {};
+    this.configState = data.configState ?? {};
     this.settings.transferChunkSizeMiB = normalizeTransferChunkSizeMiB(this.settings.transferChunkSizeMiB);
     this.state = data.state ?? {};
     this.interruptedLastTime = !!data.syncInProgress;
@@ -73,6 +119,8 @@ export default class GSyncPlugin extends Plugin {
     await this.saveData({
       settings: this.settings,
       state: this.state,
+      pairStates: this.pairStates,
+      configState: this.configState,
       syncInProgress: this.syncInProgress,
       pendingAuth: this.pendingAuth,
     } satisfies PluginData);
@@ -183,6 +231,99 @@ export default class GSyncPlugin extends Plugin {
     else if (showNotice && Platform.isMobile) this.showSyncProgress();
   }
 
+  /** Problems with the folder pairs, by pair id. A bad pair is skipped; the rest still sync. */
+  validatePairs(): Map<string, string> {
+    const problems = new Map<string, string>();
+    const pairs = this.settings.pairs;
+    for (const p of pairs) {
+      const local = cleanPath(p.local);
+      if (!local || !p.remote) problems.set(p.id, "Set both a vault folder and a Drive folder.");
+      else if (local.split("/").some((seg) => seg.startsWith("."))) problems.set(p.id, "Hidden folders can't be synced.");
+      else if (pairs.some((o) => o !== p && o.local && (underPrefix(local, cleanPath(o.local)) || underPrefix(cleanPath(o.local), local))))
+        problems.set(p.id, `"${local}" overlaps another folder pair.`);
+      else if (isSharedDrivePath(p.remote) && !this.isTeams()) problems.set(p.id, "Folders in Shared Drives need the GSync Teams add-on.");
+    }
+    return problems;
+  }
+
+  private async syncAllFolders(quiet: boolean): Promise<SyncResult & { needsRestart: boolean }> {
+    const s = this.settings;
+    this.drive.resetCache();
+    const total: SyncResult & { needsRestart: boolean } = {
+      uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0,
+      conflicts: [], errors: [], warnings: [], skipped: [], readOnlyKept: [], needsRestart: false,
+    };
+    const add = (r: SyncResult) => {
+      total.uploaded += r.uploaded;
+      total.downloaded += r.downloaded;
+      total.deletedLocal += r.deletedLocal;
+      total.deletedRemote += r.deletedRemote;
+      for (const k of ["conflicts", "errors", "warnings", "skipped", "readOnlyKept"] as const) total[k].push(...r[k]);
+    };
+    const hooks = {
+      checkpoint: () => this.saveAll(),
+      progress: (done: number, count: number, transferred: number) => {
+        this.activeProgress?.files(done, count);
+        this.renderProgress(done === count, transferred > 0 || !quiet);
+      },
+      transfer: (progress: Parameters<NonNullable<Parameters<typeof runSync>[4]["transfer"]>>[0]) => {
+        const changed = this.activeProgress?.transfer(progress);
+        this.renderProgress(changed, true);
+      },
+    };
+
+    const problems = this.validatePairs();
+    const pairs = s.pairs.filter((p) => !problems.has(p.id));
+    for (const [id, msg] of problems) {
+      const p = s.pairs.find((x) => x.id === id);
+      if (p && (p.local || p.remote)) total.errors.push(`Folder pair "${p.local || p.remote}": ${msg}`);
+    }
+
+    const jobs: { id: string; scope: Omit<SyncScope, "readOnly">; state: () => SyncState }[] = [
+      {
+        id: "main",
+        scope: { localPrefix: "", remotePath: s.remoteFolder, otherPrefixes: pairs.map((p) => cleanPath(p.local)) },
+        state: () => this.state,
+      },
+      ...pairs.map((p) => ({
+        id: p.id,
+        scope: { localPrefix: cleanPath(p.local), remotePath: p.remote, otherPrefixes: [] },
+        state: () => (this.pairStates[p.id] ??= {}),
+      })),
+    ];
+    if (isSharedDrivePath(s.remoteFolder) && !this.isTeams()) {
+      jobs.shift();
+      total.errors.push("The whole-vault Drive folder is in a Shared Drive, which needs the GSync Teams add-on.");
+    }
+
+    for (const job of jobs) {
+      try {
+        const rootId = await this.drive.ensureFolderPath(job.scope.remotePath);
+        const access = await this.drive.folderAccess(rootId);
+        this.access.set(job.id, access);
+        add(await runSync(this.app, this.drive, s, job.state(), hooks, { ...job.scope, readOnly: !access.canEdit }));
+        if (job.id === "main" && s.configSync.enabled) {
+          if (!access.canEdit) total.warnings.push("Settings sync skipped: the whole-vault Drive folder is view-only for you.");
+          else {
+            const c = await runConfigSync(this.app, this.drive, s.configSync, rootId, this.configState, {
+              propagateDeletes: s.propagateDeletes,
+              maxBytes: Math.max(0, s.maxFileSizeMB) * 1024 * 1024,
+            });
+            total.uploaded += c.uploaded;
+            total.downloaded += c.downloaded;
+            total.deletedRemote += c.deleted;
+            total.errors.push(...c.errors);
+            total.needsRestart ||= c.needsRestart;
+          }
+        }
+      } catch (e) {
+        total.errors.push(`${job.scope.remotePath || "Drive folder"}: ${(e as Error).message}`);
+      }
+      await this.saveAll();
+    }
+    return total;
+  }
+
   async sync(quiet: boolean) {
     if (this.syncing) {
       if (!quiet) new Notice("Sync already running.");
@@ -201,17 +342,7 @@ export default class GSyncPlugin extends Plugin {
     this.activeProgress = new SyncProgress();
     this.renderProgress(true, !quiet);
     try {
-      const r = await runSync(this.app, this.drive, s, this.state, {
-        checkpoint: () => this.saveAll(),
-        progress: (done, total, transferred) => {
-          this.activeProgress?.files(done, total);
-          this.renderProgress(done === total, transferred > 0 || !quiet);
-        },
-        transfer: (progress) => {
-          const changed = this.activeProgress?.transfer(progress);
-          this.renderProgress(changed, true);
-        },
-      });
+      const r = await this.syncAllFolders(quiet);
       this.syncInProgress = false;
       await this.saveAll();
       const parts: string[] = [];
@@ -229,6 +360,12 @@ export default class GSyncPlugin extends Plugin {
       if (r.errors.length) {
         console.error("[gsync] errors", r.errors);
         new Notice(`${r.errors.length} file(s) failed to sync. First: ${r.errors[0]}`, 15000);
+      }
+      if (r.readOnlyKept.length) {
+        new Notice(`${r.readOnlyKept.length} change(s) in view-only folders stayed on this device (edits are kept as "(local edit …)" copies):\n${r.readOnlyKept.slice(0, 5).join("\n")}`, 15000);
+      }
+      if (r.needsRestart) {
+        new Notice("GSync: settings or plugins arrived from another device. Restart Obsidian to apply them.", 0);
       }
       if (r.skipped.length) {
         new Notice(`Skipped ${r.skipped.length} file(s) over ${s.maxFileSizeMB} MB:\n${r.skipped.slice(0, 5).join("\n")}`, 15000);

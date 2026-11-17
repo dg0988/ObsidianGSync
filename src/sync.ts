@@ -26,6 +26,20 @@ export interface SyncResult {
   errors: string[];
   warnings: string[];
   skipped: string[];
+  /** Local edits/new files in read-only folders that were not uploaded. */
+  readOnlyKept: string[];
+}
+
+/** One vault folder <-> one Drive folder. The main pair covers the whole vault (prefix ""). */
+export interface SyncScope {
+  /** Vault folder this pair covers ("" = whole vault). */
+  localPrefix: string;
+  /** Drive folder path, e.g. "Obsidian/Notes" or "Shared drives/Company/Notes". */
+  remotePath: string;
+  /** Vault folders handled by other pairs, which this pair must leave alone. */
+  otherPrefixes: string[];
+  /** The user can only view this Drive folder: never upload or delete there. */
+  readOnly: boolean;
 }
 
 export interface SyncHooks {
@@ -78,27 +92,41 @@ function conflictPath(path: string): string {
   return `${dir}${base} (conflict ${stamp})${ext}`;
 }
 
+export function underPrefix(path: string, prefix: string): boolean {
+  return !prefix || path === prefix || path.startsWith(prefix + "/");
+}
+
 export async function runSync(
   app: App,
   drive: DriveClient,
   settings: GSyncSettings,
   state: SyncState,
-  hooks: SyncHooks
+  hooks: SyncHooks,
+  scope: SyncScope = { localPrefix: "", remotePath: settings.remoteFolder, otherPrefixes: [], readOnly: false }
 ): Promise<SyncResult> {
   const vault = app.vault;
-  const res: SyncResult = { uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0, conflicts: [], errors: [], warnings: [], skipped: [] };
+  const res: SyncResult = { uploaded: 0, downloaded: 0, deletedLocal: 0, deletedRemote: 0, conflicts: [], errors: [], warnings: [], skipped: [], readOnlyKept: [] };
+  const prefix = scope.localPrefix.replace(/^\/+|\/+$/g, "");
+  const inScope = (path: string) => underPrefix(path, prefix) && !scope.otherPrefixes.some((o) => o && underPrefix(path, o));
+  /** Vault path -> path inside the Drive folder. */
+  const toRemote = (path: string) => (prefix ? path.slice(prefix.length + 1) : path);
+  const toVault = (rel: string) => (prefix ? (rel ? `${prefix}/${rel}` : prefix) : rel);
   const maxBytes = Math.max(0, settings.maxFileSizeMB) * 1024 * 1024;
   const rules = parseExcludes(settings.excludes);
   const configDir = vault.configDir;
   const android = Platform.isAndroidApp ? new AndroidFiles(vault.adapter, configDir) : null;
   if (android) res.warnings.push(...await android.recover());
 
-  const rootId = await drive.ensureFolderPath(settings.remoteFolder);
-  const tree: RemoteTree = await drive.listTree(rootId);
-  res.warnings.push(...tree.warnings);
+  const rootId = await drive.ensureFolderPath(scope.remotePath);
+  const listed: RemoteTree = await drive.listTree(rootId);
+  res.warnings.push(...listed.warnings);
+  // Re-key the Drive listing by vault path, so the rest of the engine works in vault paths.
+  const tree: RemoteTree = { files: new Map(), folders: new Map(), warnings: listed.warnings };
+  for (const [rel, f] of listed.files) tree.files.set(toVault(rel), f);
+  for (const [rel, id] of listed.folders) tree.folders.set(toVault(rel), id);
 
   const local = new Map<string, TFile>();
-  for (const f of vault.getFiles()) if (!isExcluded(f.path, rules, configDir)) local.set(f.path, f);
+  for (const f of vault.getFiles()) if (inScope(f.path) && !isExcluded(f.path, rules, configDir)) local.set(f.path, f);
   const remote = tree.files;
 
   // ---- helpers ------------------------------------------------------------
@@ -110,9 +138,9 @@ export async function runSync(
   };
 
   const ensureRemoteParent = async (path: string): Promise<string> => {
-    const parts = path.split("/").slice(0, -1);
-    let cur = "";
-    let parentId = tree.folders.get("") as string;
+    const parts = toRemote(path).split("/").slice(0, -1);
+    let cur = prefix;
+    let parentId = tree.folders.get(prefix) as string;
     for (const p of parts) {
       cur = cur ? `${cur}/${p}` : p;
       let id = tree.folders.get(cur);
@@ -144,6 +172,7 @@ export async function runSync(
   };
 
   const uploadNew = async (path: string, data: ArrayBuffer): Promise<RemoteFile> => {
+    if (scope.readOnly) throw new Error("Read-only folder: uploads are not allowed");
     const parentId = await ensureRemoteParent(path);
     const name = path.split("/").pop() as string;
     return drive.createFile(name, parentId, data);
@@ -171,6 +200,7 @@ export async function runSync(
   };
 
   const uploadLocal = async (path: string, remoteId?: string): Promise<RemoteFile> => {
+    if (scope.readOnly) throw new Error("Read-only folder: uploads are not allowed");
     if (!android) {
       hooks.transfer?.({ phase: "upload", path });
       const file = vault.getAbstractFileByPath(path);
@@ -192,6 +222,62 @@ export async function runSync(
   };
 
   const localChangedSince = (f: TFile, s: SyncRecord) => f.stat.mtime !== s.localMtime || f.stat.size !== s.localSize;
+
+  /** A path that is free both here and in Drive, next to `path`. */
+  const freeCopyPath = async (path: string, label: string): Promise<string> => {
+    let c = conflictPath(path).replace("(conflict ", `(${label} `);
+    while (await vault.adapter.exists(c) || tree.files.has(c)) {
+      const suffix = "-" + crypto.randomUUID().slice(0, 8);
+      const dot = c.lastIndexOf(".");
+      c = dot > c.lastIndexOf("/") ? c.slice(0, dot) + suffix + c.slice(dot) : c + suffix;
+    }
+    return c;
+  };
+
+  /**
+   * Read-only folder: Drive is the source of truth. A local edit is kept as a
+   * "(local edit …)" copy next to the file, then the Drive version is restored.
+   */
+  const restoreFromDrive = async (path: string, l: TFile | undefined, r: RemoteFile) => {
+    if (l) {
+      const copy = await freeCopyPath(path, "local edit");
+      await vault.adapter.copy(path, copy);
+      res.readOnlyKept.push(copy);
+    }
+    await downloadLocal(path, r);
+    await record(path, r);
+    res.downloaded++;
+  };
+
+  const syncReadOnly = async (path: string, l: TFile | undefined, r: RemoteFile | undefined, s: SyncRecord | undefined) => {
+    if (l && r) {
+      const lChanged = !s || localChangedSince(l, s);
+      const rChanged = !s || rev(r) !== s.remoteRev || r.id !== s.remoteId;
+      if (!lChanged && !rChanged) return;
+      if (!s && validSha256(r.sha256Checksum) && String(l.stat.size) === r.size) {
+        const digest = await hashLocalFile(vault.adapter, path,
+          bytes => hooks.transfer?.({ phase: "hash", path, bytes, total: l.stat.size }));
+        if (digest === r.sha256Checksum.toLowerCase()) { await record(path, r); return; }
+      }
+      if (lChanged) await restoreFromDrive(path, l, r);
+      else { await downloadLocal(path, r); await record(path, r); res.downloaded++; }
+    } else if (l && !r) {
+      if (s && settings.propagateDeletes && !localChangedSince(l, s)) {
+        await app.fileManager.trashFile(l); // removed in Drive -> remove here
+        delete state[path];
+        res.deletedLocal++;
+      } else {
+        delete state[path];
+        res.readOnlyKept.push(path); // new local file: stays on this device only
+      }
+    } else if (!l && r) {
+      await downloadLocal(path, r); // also restores files deleted on this device
+      await record(path, r);
+      res.downloaded++;
+    } else {
+      delete state[path];
+    }
+  };
 
   const resolveBothChanged = async (path: string, l: TFile, r: RemoteFile) => {
     const expected = await vault.adapter.stat(path);
@@ -256,7 +342,7 @@ export async function runSync(
   };
 
   // ---- main pass ----------------------------------------------------------
-  const paths = Array.from(new Set([...local.keys(), ...remote.keys(), ...Object.keys(state)])).sort();
+  const paths = Array.from(new Set([...local.keys(), ...[...remote.keys()].filter(inScope), ...Object.keys(state).filter(inScope)])).sort();
 
   const work = () => res.uploaded + res.downloaded + res.deletedLocal + res.deletedRemote + res.conflicts.length;
   let lastCheckpointWork = 0;
@@ -285,6 +371,11 @@ export async function runSync(
         continue;
       }
       const s = state[path];
+
+      if (scope.readOnly) {
+        await syncReadOnly(path, l, r, s);
+        continue;
+      }
 
       if (l && r) {
         if (!s) {

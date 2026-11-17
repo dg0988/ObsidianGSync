@@ -16,9 +16,17 @@ Works on **Windows, macOS, Linux, Android, and iPad/iPhone**, including mobile d
 - **Conflict-safe**: if a note changed in both places, nothing is overwritten. Your local version keeps the name and the Drive version is saved beside it as `note (conflict YYYY-MM-DD HHmm).md`.
 - **Deletes go to the trash**: deleted files go to Drive's trash (kept 30 days) or Obsidian's trash, never hard-deleted. Deletion sync can be turned off.
 - **Works with existing Drive folders**: point it at a folder that already holds your notes (for example one kept by Google Drive for Desktop). The first sync compares contents, so nothing is duplicated.
-- **Leaves device settings alone**: hidden folders like `.obsidian`, `.trash`, and `.git` are never synced, so each device keeps its own settings and plugins.
+- **Several folders, several Drive folders**: sync the whole vault with one Drive folder and, say, your `Work` folder with a folder your team shares.
+- **Folders shared with you as view-only**: Drive's changes download; your edits stay on your device as `(local edit …)` copies instead of failing or overwriting the team's files.
+- **Optional settings sync** (off by default): keep Obsidian settings, themes and community plugins the same on every device, with a list of plugins to keep separate. GSync's own sign-in data and each device's window layout are never synced.
+- **Android large files**: big files move in bounded pieces (up to 16 MB at a time) with live progress, so phones don't run out of memory.
 - **Mobile-friendly**: progress is saved every 10 files, large files can be skipped, and an interrupted sync resumes where it stopped.
+- **Fast first sync**: files that already match Drive are recognized by checksum, without downloading them.
 - **Your own Google credentials**: you create your own OAuth client. No third-party server stores your data or tokens.
+
+### For businesses: the GSync Teams add-on
+
+GSync is free and complete on its own. **GSync Teams** is a separate, paid add-on plugin for businesses that keep documentation in Google Drive: it lets GSync sync folders in **Shared Drives**, and lets you **manage who can view or edit each synced folder** from inside Obsidian. See [GSync Teams](#gsync-teams-add-on) below.
 
 ---
 
@@ -39,7 +47,7 @@ Many Google Drive sync plugins expect to own their Drive folder: start from an e
 GSync makes deliberate trade-offs:
 
 - **Setup takes about 10 minutes**, because you create your own Google Cloud OAuth client. Plugins that sign you in through their own service are quicker to set up, in exchange for routing sign-in through the developer's server.
-- **Settings and plugins aren't synced.** GSync never touches your vault's configuration folder, so each device keeps its own settings, plugins, and themes. If you want identical settings everywhere, you'll need another tool for that part.
+- **Settings sync is off by default.** Turn it on per device if you want the same settings, themes and plugins everywhere.
 - **The Drive folder is found by its path.** If you rename or move the folder in Google Drive, update the path in GSync's settings.
 
 ---
@@ -47,11 +55,12 @@ GSync makes deliberate trade-offs:
 ## Requirements and disclosures
 
 - **Google account required.** You also need a free Google Cloud project to create your own OAuth client (setup below).
+- **Free.** GSync has no paid features. The separate GSync Teams add-on is a different plugin, sold separately.
 - **Network use.** GSync connects to:
   - `accounts.google.com` and `oauth2.googleapis.com`: Google sign-in and refreshing access tokens.
   - `www.googleapis.com`: the Google Drive API, to list, download, upload, and trash files in the folder you choose.
   - `dg0988.github.io` (only during sign-in, and only if you keep the default redirect page): a static page in this repository ([`docs/callback.html`](docs/callback.html)) that hands Google's one-time sign-in code back to Obsidian through an `obsidian://` link. It has no server-side code and stores nothing. You can host your own copy instead.
-- **Vault access.** To compare your vault with Drive, GSync lists every file in the vault (except excluded files, hidden files, and the vault's config folder) and reads or writes only the files it syncs.
+- **Vault access.** To compare your vault with Drive, GSync lists every file in the vault (except excluded files, hidden files, and the vault's config folder) and reads or writes only the files it syncs. With settings sync turned on, it also reads and writes files in the vault's config folder (never GSync's own folder or the window-layout files).
 - **Clipboard.** GSync only *writes* to the clipboard, and only when you ask: the **Copy refresh token** button, or copying the sign-in link if your browser can't be opened. It never reads the clipboard.
 - No telemetry, analytics, or ads. Nothing is sent anywhere except Google.
 
@@ -156,13 +165,47 @@ Start a sync with any of:
 | OAuth client ID / secret | — | From your Google Cloud **Web application** OAuth client. |
 | Refresh token (manual) | — | Filled in by signing in; or paste one from another device. |
 | Sign-in redirect page | `https://dg0988.github.io/ObsidianGSync/callback.html` | Must exactly match an authorized redirect URI on your OAuth client. |
-| Google Drive folder | `Obsidian/<vault name>` | Path under *My Drive*. Backslashes are converted to `/`. |
+| Google Drive folder | `Obsidian/<vault name>` | For the whole vault. Path under *My Drive*. Backslashes are converted to `/`. |
+| More folders | none | Extra vault folders, each with its own Drive folder (see below). |
 | Auto-sync every (minutes) | `10` | `0` disables auto-sync. Only runs while Obsidian is open. |
 | Sync when Obsidian starts | On | Skipped automatically if the previous sync didn't finish. |
 | Sync deletions | On | Off = files deleted on one side come back on the next sync. |
 | Max file size (MB) | `25` | Larger files are skipped and listed. `0` = no limit. Use ~10 on phones. |
 | Exclude | `desktop.ini`, `Thumbs.db` | One rule per line (see below). |
 | Reset sync state | — | Forgets sync history. The next sync compares every file by content; nothing is deleted. |
+| Transfer chunk size (MiB) | `16` | Android only: how much is sent or received per request. Lower it if a phone runs low on memory. |
+| Sync settings and plugins | Off | Settings sync (see below). |
+
+### More folders
+
+Each extra folder pair links one **vault folder** with one **Drive folder**:
+
+| Vault folder | Drive folder | Use |
+|---|---|---|
+| `Work` | `Company/Team notes` | A folder a colleague shared with you |
+| `Clients` | `Shared drives/Acme/Clients` | A folder in a Shared Drive (needs the GSync Teams add-on) |
+
+- The whole-vault Drive folder skips these vault folders, in both directions.
+- Pairs can't overlap, and hidden folders can't be paired.
+- Removing a pair only stops syncing it. No files are deleted.
+- If a Drive folder is **view-only** for you, GSync downloads its changes and never uploads or deletes there. An edit you make is kept as a `(local edit …)` copy and the Drive version is restored; new files you add stay on your device.
+
+### Settings sync
+
+Off by default. Turn it on, per device, under **Settings → GSync → Plugins and preferences**. GSync then syncs the vault's config folder (usually `.obsidian`) with the folder of the same name inside the whole-vault Drive folder. That's where Google Drive for Desktop already keeps a computer's vault settings, so a phone can take on the computer's setup.
+
+| Toggle | Covers |
+|---|---|
+| Core settings and hotkeys | `app.json`, `hotkeys.json`, `core-plugins.json` and other settings files |
+| Appearance | `appearance.json`, `themes/`, `snippets/` |
+| Enabled plugins list | `community-plugins.json` |
+| Installed plugins | `plugins/<plugin>/` (code and settings) |
+
+- **The first time** you turn it on, this device takes the settings already in Drive where both sides have a file. After that, changes go both ways, and if both sides changed, this device's version wins.
+- **Keep these plugins separate**: one plugin folder name per line. Those plugins, and whether they're turned on, stay separate on each device.
+- **Never synced**: GSync's own folder (sign-in data, sync history), `workspace.json` and `workspace-mobile.json` (each device's window layout), and hidden or `node_modules` folders.
+- **Restart Obsidian** after settings or plugins arrive. GSync shows a notice when that's needed.
+- Plugin settings can contain API keys or passwords for other services. If a plugin's settings shouldn't leave a device, add it to the separate list.
 
 ### Exclude rules
 
@@ -190,7 +233,8 @@ GSync remembers what each file looked like on both sides at the last sync:
 | Deleted locally, unchanged in Drive | Moved to Drive trash |
 | Deleted in Drive, unchanged locally | Moved to Obsidian trash |
 | Deleted on one side, edited on the other | The edit wins; the file is restored |
-| Exists on both sides, never synced before | Contents compared; identical files are left alone |
+| Exists on both sides, never synced before | Contents compared (by checksum where Drive provides one); identical files are left alone |
+| View-only folder, edited here | Drive version restored; your edit kept as a `(local edit …)` copy |
 
 **Limitations**
 - Renames sync as a delete plus a new file.
@@ -213,9 +257,24 @@ GSync remembers what each file looked like on both sides at the last sync:
 | `Drive API 403` on first sync | Enable the **Google Drive API** for your project. |
 | A new, empty folder appeared in Drive | The folder path doesn't match. Check spelling and capitalization, and use `/` between folders. Delete the stray folder. |
 | "The last sync didn't finish…" | Obsidian closed or crashed mid-sync. Progress was saved; tap **Sync now** to resume. |
-| Obsidian crashes during the first mobile sync | Lower **Max file size** to 10, exclude installers and archives, and leave the app on one note until the sync finishes. |
+| Obsidian crashes during the first mobile sync | Lower **Transfer chunk size** to 4 or 1, and leave the app on one note until the sync finishes. |
+| "Folders in Shared Drives need the GSync Teams add-on" | Install and activate the GSync Teams add-on. Folders shared with you in My Drive work without it. |
+| `Shared drive "…" not found` | Use the Shared Drive's exact name after `Shared drives/`, and check that your account is a member. |
+| "(local edit …)" files appear | That folder is view-only for you. Ask the folder's owner for Editor access, or move your changes to a folder you own. |
+| "Restart Obsidian to apply them" | Settings sync brought new settings or plugins. Restart Obsidian. |
 
 Errors are logged to the developer console (desktop: **Ctrl+Shift+I**) with the prefix `[gsync]`.
+
+---
+
+## GSync Teams add-on
+
+GSync Teams is a separate plugin that works together with GSync. It's for businesses that keep their documentation in Google Drive:
+
+- **Shared Drives**: sync a vault folder with a folder in a Shared Drive (`Shared drives/<drive name>/<folder>`), so documentation belongs to the business, not to one person's account.
+- **Manage access**: a people icon next to each synced folder shows who has access, and lets you add people as Viewer, Commenter or Editor, change roles, or remove access. Google Drive enforces these roles in every app.
+
+GSync does all the syncing either way; the add-on never syncs files itself. Install it from Community plugins (search **GSync Teams**), or see [dg0988/ObsidianGSyncTeams](https://github.com/dg0988/ObsidianGSyncTeams).
 
 ---
 
@@ -224,7 +283,7 @@ Errors are logged to the developer console (desktop: **Ctrl+Shift+I**) with the 
 - Files go directly between your device and Google's API.
 - Your client ID, client secret, and refresh token are stored only in each device's `.obsidian/plugins/gsync/data.json`. **Never commit or share that file.** The refresh token grants access to your Google Drive.
 - Sign-in uses PKCE. The code passed through the redirect page is useless without the secret verifier that stays on your device.
-- GSync requests the full Drive scope (`https://www.googleapis.com/auth/drive`) so it can see files already in your folder that it didn't create. It only reads and writes inside the folder you configure.
+- GSync requests the full Drive scope (`https://www.googleapis.com/auth/drive`) so it can see files already in your folder that it didn't create. It only reads and writes inside the folders you configure, and never changes who has access to a folder (only the GSync Teams add-on does that, when you ask it to).
 - To revoke access everywhere, remove the app at <https://myaccount.google.com/permissions>.
 
 ---
