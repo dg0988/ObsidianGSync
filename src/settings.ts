@@ -1,6 +1,7 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type GSyncPlugin from "./main";
 import { DEFAULT_REDIRECT } from "./auth";
+import { DEFAULT_TRANSFER_CHUNK_MIB, normalizeTransferChunkSizeMiB, TRANSFER_CHUNK_OPTIONS_MIB } from "./transfer-settings";
 
 const DONATE_URL = "https://www.paypal.com/donate/?hosted_button_id=N8NVQRB353E2G";
 
@@ -15,6 +16,7 @@ export interface GSyncSettings {
   propagateDeletes: boolean;
   excludes: string;
   maxFileSizeMB: number;
+  transferChunkSizeMiB: number;
 }
 
 export const DEFAULT_SETTINGS: GSyncSettings = {
@@ -28,6 +30,7 @@ export const DEFAULT_SETTINGS: GSyncSettings = {
   propagateDeletes: true,
   excludes: "# One rule per line. Hidden files/folders and the vault config folder are always skipped.\n# Examples:  Templates/   *.tmp   desktop.ini\ndesktop.ini\nThumbs.db\n",
   maxFileSizeMB: 25,
+  transferChunkSizeMiB: DEFAULT_TRANSFER_CHUNK_MIB,
 };
 
 export class GSyncSettingTab extends PluginSettingTab {
@@ -193,6 +196,17 @@ export class GSyncSettingTab extends PluginSettingTab {
           await this.plugin.saveAll();
         })
       );
+
+    new Setting(containerEl)
+      .setName("Transfer chunk size (MiB)")
+      .setDesc("Android downloads and uploads. Larger blocks reduce requests but use more memory. Applies to the next file transfer; smaller files use a single block.")
+      .addDropdown((dropdown) => {
+        for (const size of TRANSFER_CHUNK_OPTIONS_MIB) dropdown.addOption(String(size), String(size));
+        dropdown.setValue(String(normalizeTransferChunkSizeMiB(s.transferChunkSizeMiB))).onChange(async (value) => {
+          s.transferChunkSizeMiB = normalizeTransferChunkSizeMiB(Number(value));
+          await this.plugin.saveAll();
+        });
+      });
 
     new Setting(containerEl)
       .setName("Exclude")

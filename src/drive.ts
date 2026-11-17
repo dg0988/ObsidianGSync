@@ -1,17 +1,21 @@
 import { requestUrl, RequestUrlResponse } from "obsidian";
 
+import { downloadChunks, uploadChunks, BinarySource, ByteProgress } from "./drive-transfer";
+import { DRIVE_FILE_FIELDS as FIELDS } from "./remote-metadata";
+
 const API = "https://www.googleapis.com/drive/v3";
 const UPLOAD = "https://www.googleapis.com/upload/drive/v3";
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
-const FIELDS = "id,name,mimeType,md5Checksum,modifiedTime,size";
 
 export interface RemoteFile {
   id: string;
   name: string;
   mimeType: string;
   md5Checksum?: string;
+  sha256Checksum?: string;
   modifiedTime: string;
   size?: string;
+  version?: string;
 }
 
 export interface RemoteTree {
@@ -36,7 +40,7 @@ export class DriveClient {
 
   private async req(
     url: string,
-    opts: { method?: string; body?: string | ArrayBuffer; contentType?: string } = {}
+    opts: { method?: string; body?: string | ArrayBuffer; contentType?: string; headers?: Record<string, string>; retry?: boolean } = {}
   ): Promise<RequestUrlResponse> {
     for (let attempt = 0; ; attempt++) {
       const token = await this.getToken();
@@ -45,10 +49,10 @@ export class DriveClient {
         method: opts.method ?? "GET",
         body: opts.body,
         contentType: opts.contentType,
-        headers: { Authorization: `Bearer ${token}` },
+        headers: { ...opts.headers, Authorization: `Bearer ${token}` },
         throw: false,
       });
-      if ((r.status === 429 || r.status >= 500) && attempt < 4) {
+      if ((r.status === 429 || r.status >= 500) && opts.retry !== false && attempt < 4) {
         await sleep(1000 * 2 ** attempt);
         continue;
       }
@@ -133,6 +137,18 @@ export class DriveClient {
       }
     }
     return { files, folders, warnings };
+  }
+
+  downloadChunks(file: RemoteFile, onProgress?: ByteProgress, chunkSize?: number): AsyncGenerator<ArrayBuffer> {
+    return downloadChunks((url, options) => this.req(url, options), file, onProgress, chunkSize);
+  }
+
+  uploadChunks(size: number, chunks: BinarySource, target: { name: string; parentId: string } | { id: string }, onProgress?: ByteProgress, chunkSize?: number): Promise<RemoteFile> {
+    return uploadChunks((url, options) => this.req(url, options), size, chunks, target, onProgress, chunkSize);
+  }
+
+  async getFile(id: string): Promise<RemoteFile> {
+    return (await this.req(`${API}/files/${encodeURIComponent(id)}?fields=${FIELDS}`)).json as RemoteFile;
   }
 
   async download(id: string): Promise<ArrayBuffer> {
